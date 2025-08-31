@@ -36,6 +36,7 @@
 #include <vector>
 #include <type_traits>
 #include <unordered_map>
+#include <filesystem>
 
 #include "../util/util_flush.h"
 #include "../util/util_lru.h"
@@ -109,6 +110,16 @@ namespace dxvk {
     void*           mapPtr = nullptr;
   };
 
+  struct D3D9SideloadCursor {
+    unsigned char *data = nullptr;
+
+    UINT XHotSpot = 0u;
+    UINT YHotSpot = 0u;
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+  };
+  
   struct D3D9TextureSlotTracking {
     /* Pixel shaders can access 16 textures/samplers.
      * Then there's 1 dmap texture/sampler.
@@ -1607,6 +1618,9 @@ namespace dxvk {
     VkDeviceSize                    m_stagingMemorySignaled = 0ull;
 
     D3D9Cursor                      m_cursor;
+    std::unordered_map<std::string, struct D3D9SideloadCursor> m_sideloadCursors;
+
+    D3D9SideloadCursor GetEnlargedCursor(const bool hwCursor, uint32_t inputWidth, uint32_t inputHeight, UINT XHotSpot, UINT YHotSpot, const uint8_t* inputData);
 
     Com<D3D9Surface, false>         m_autoDepthStencil;
 

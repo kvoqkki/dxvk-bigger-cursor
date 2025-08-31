@@ -14,7 +14,6 @@
 #include "../sha1/sha1_util.h"
 
 namespace dxvk {
-
   using ProfileList = std::vector<std::pair<const char*, Config>>;
 
 
@@ -42,8 +41,9 @@ namespace dxvk {
     }} },
     /* World of Warcraft                           *
      * Bugs out on some multi-gpu systems.         */
-    { R"(\\Wow(Classic)?\.exe$)", {{
-      { "dxvk.hideIntegratedGraphics",      "True" },
+    { R"(\\(w|W)(o|O)(w|W)(Classic)?(_sideload-DLL|_tweaked)?\.exe$)", {{
+      { "dxvk.hideIntegratedGraphics",      "True"  },
+      { "d3d9.enlargeHardwareCursor",       "4" },
     }} },
     /* Bright Memory - Will choose other vendors   *
      * over Intel even if Intel is the only dGPU   */
