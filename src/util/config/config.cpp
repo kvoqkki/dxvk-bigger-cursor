@@ -55,6 +55,10 @@ namespace dxvk {
     { R"(\\ACShadows\.exe$)", {{
       { "dxgi.enableDummyCompositionSwapchain", "True" }
     }} },
+    /* Anno 117: Uses composition swapchain        */
+    { R"(\\Anno117\.exe$)", {{
+      { "dxgi.enableDummyCompositionSwapchain", "True" }
+    }} },
 
     /**********************************************/
     /* D3D11 GAMES                                */
@@ -1102,6 +1106,12 @@ namespace dxvk {
      * D3DLOCK_DISCARD flag is respected          */
     { R"(\\Scarface\.exe$)", {{
       { "d3d9.allowDiscard",               "False" },
+    }} },
+    /* Heroes of Annihilated Empires              *
+     * Cursor and other animations play back too  *
+     * fast without a frame cap in place.         */
+    { R"(\\Heroes of Annihilated Empires.*\\engine\.exe$)", {{
+      { "d3d9.maxFrameRate",                  "60" },
     }} },
 
     /**********************************************/

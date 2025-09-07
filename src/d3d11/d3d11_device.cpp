@@ -1,6 +1,10 @@
 #include <algorithm>
 #include <cstring>
 
+#include <dxbc/dxbc_container.h>
+#include <dxbc/dxbc_parser.h>
+#include <dxbc/dxbc_signature.h>
+
 #include "../dxgi/dxgi_monitor.h"
 #include "../dxgi/dxgi_surface.h"
 #include "../dxgi/dxgi_swapchain.h"
@@ -46,7 +50,7 @@ namespace dxvk {
     m_dxvkAdapter       (m_dxvkDevice->adapter()),
     m_d3d11Formats      (m_dxvkDevice),
     m_d3d11Options      (m_dxvkDevice->instance()->config()),
-    m_dxbcOptions       (m_dxvkDevice, m_d3d11Options),
+    m_shaderOptions     (GetShaderOptions(m_dxvkDevice, m_d3d11Options)),
     m_maxFeatureLevel   (GetMaxFeatureLevel(m_dxvkDevice->instance(), m_dxvkDevice->adapter())),
     m_deviceFeatures    (m_dxvkDevice->instance(), m_dxvkDevice->adapter(), m_d3d11Options, m_featureLevel) {
     m_initializer = new D3D11Initializer(this);
@@ -670,11 +674,13 @@ namespace dxvk {
       return E_INVALIDARG;
 
     try {
-      DxbcReader dxbcReader(reinterpret_cast<const char*>(
-        pShaderBytecodeWithInputSignature), BytecodeLength);
-      DxbcModule dxbcModule(dxbcReader);
+      dxbc_spv::dxbc::Container container(pShaderBytecodeWithInputSignature, BytecodeLength);
+      auto isgnChunk = container.getInputSignatureChunk();
 
-      const Rc<DxbcIsgn> inputSignature = dxbcModule.isgn();
+      if (!isgnChunk)
+        return E_INVALIDARG;
+
+      dxbc_spv::dxbc::Signature inputSignature(std::move(isgnChunk));
 
       uint32_t attrMask = 0;
       uint32_t bindMask = 0;
@@ -685,13 +691,13 @@ namespace dxvk {
       std::array<DxvkVertexBinding,   D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> bindList = { };
 
       for (uint32_t i = 0; i < NumElements; i++) {
-        const DxbcSgnEntry* entry = inputSignature->find(
+        auto entry = inputSignature.findSemantic(0u,
           pInputElementDescs[i].SemanticName,
-          pInputElementDescs[i].SemanticIndex, 0);
+          pInputElementDescs[i].SemanticIndex);
 
         // Create vertex input attribute description
         DxvkVertexAttribute attrib = { };
-        attrib.location = entry != nullptr ? entry->registerId : 0;
+        attrib.location = entry != inputSignature.end() ? entry->getRegisterIndex() : 0;
         attrib.binding  = pInputElementDescs[i].InputSlot;
         attrib.format   = LookupFormat(pInputElementDescs[i].Format, DXGI_VK_FORMAT_MODE_COLOR).Format;
         attrib.offset   = pInputElementDescs[i].AlignedByteOffset;
@@ -728,7 +734,7 @@ namespace dxvk {
         binding.divisor   = pInputElementDescs[i].InstanceDataStepRate;
         binding.inputRate = pInputElementDescs[i].InputSlotClass == D3D11_INPUT_PER_INSTANCE_DATA
           ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
-        binding.extent    = entry ? uint32_t(attrib.offset + formatInfo->elementSize) : 0u;
+        binding.extent    = entry != inputSignature.end() ? uint32_t(attrib.offset + formatInfo->elementSize) : 0u;
 
         // Check if the binding was already defined. If so, the
         // parameters must be identical (namely, the input rate).
@@ -743,7 +749,7 @@ namespace dxvk {
           bindingsDefined |= 1u << binding.binding;
         }
 
-        if (entry) {
+        if (entry != inputSignature.end()) {
           attrMask |= 1u << i;
           bindMask |= 1u << binding.binding;
           locationMask |= 1u << attrib.location;
@@ -751,11 +757,10 @@ namespace dxvk {
       }
 
       // Ensure that all inputs used by the shader are defined
-      for (auto i = inputSignature->begin(); i != inputSignature->end(); i++) {
-        bool isBuiltIn = DxbcIsgn::compareSemanticNames(i->semanticName, "sv_instanceid")
-                      || DxbcIsgn::compareSemanticNames(i->semanticName, "sv_vertexid");
+      for (auto i = inputSignature.begin(); i != inputSignature.end(); i++) {
+        bool isBuiltIn = i->getSystemValue() != dxbc_spv::dxbc::SignatureSysval::eNone;
 
-        if (!isBuiltIn && !(locationMask & (1u << i->registerId)))
+        if (!isBuiltIn && !(locationMask & (1u << i->getRegisterIndex())))
           return E_INVALIDARG;
       }
 
@@ -787,18 +792,12 @@ namespace dxvk {
     InitReturnPtr(ppVertexShader);
     D3D11CommonShader module;
 
-    DxbcModuleInfo moduleInfo;
-    moduleInfo.options = m_dxbcOptions;
-    moduleInfo.tess    = nullptr;
-    moduleInfo.xfb     = nullptr;
+    DxvkIrShaderCreateInfo moduleInfo = { };
+    moduleInfo.options = m_shaderOptions;
 
-    Sha1Hash hash = Sha1Hash::compute(
-      pShaderBytecode, BytecodeLength);
-    
     HRESULT hr = CreateShaderModule(&module,
-      DxvkShaderKey(VK_SHADER_STAGE_VERTEX_BIT, hash),
-      pShaderBytecode, BytecodeLength, pClassLinkage,
-      &moduleInfo);
+      ComputeShaderKey(VK_SHADER_STAGE_VERTEX_BIT, pShaderBytecode, BytecodeLength),
+      pShaderBytecode, BytecodeLength, moduleInfo);
     
     if (FAILED(hr))
       return hr;
@@ -819,18 +818,12 @@ namespace dxvk {
     InitReturnPtr(ppGeometryShader);
     D3D11CommonShader module;
     
-    DxbcModuleInfo moduleInfo;
-    moduleInfo.options = m_dxbcOptions;
-    moduleInfo.tess    = nullptr;
-    moduleInfo.xfb     = nullptr;
+    DxvkIrShaderCreateInfo moduleInfo = { };
+    moduleInfo.options = m_shaderOptions;
 
-    Sha1Hash hash = Sha1Hash::compute(
-      pShaderBytecode, BytecodeLength);
-    
     HRESULT hr = CreateShaderModule(&module,
-      DxvkShaderKey(VK_SHADER_STAGE_GEOMETRY_BIT, hash),
-      pShaderBytecode, BytecodeLength, pClassLinkage,
-      &moduleInfo);
+      ComputeShaderKey(VK_SHADER_STAGE_GEOMETRY_BIT, pShaderBytecode, BytecodeLength),
+      pShaderBytecode, BytecodeLength, moduleInfo);
 
     if (FAILED(hr))
       return hr;
@@ -861,7 +854,11 @@ namespace dxvk {
 
     // Zero-init some counterss so that we can increment
     // them while walking over the stream output entries
-    DxbcXfbInfo xfb = { };
+    std::array<uint32_t, D3D11_SO_BUFFER_SLOT_COUNT> xfbOffsets = { };
+
+    DxvkIrShaderCreateInfo moduleInfo = { };
+    moduleInfo.options = m_shaderOptions;
+    moduleInfo.rasterizedStream = RasterizedStream;
 
     for (uint32_t i = 0; i < NumEntries; i++) {
       const D3D11_SO_DECLARATION_ENTRY* so = &pSODeclaration[i];
@@ -875,60 +872,36 @@ namespace dxvk {
          || so->ComponentCount <  1
          || so->ComponentCount >  4)
           return E_INVALIDARG;
-        
-        DxbcXfbEntry* entry = &xfb.entries[xfb.entryCount++];
-        entry->semanticName   = so->SemanticName;
-        entry->semanticIndex  = so->SemanticIndex;
-        entry->componentIndex = so->StartComponent;
-        entry->componentCount = so->ComponentCount;
-        entry->streamId       = so->Stream;
-        entry->bufferId       = so->OutputSlot;
-        entry->offset         = xfb.strides[so->OutputSlot];
+
+        auto& entry = moduleInfo.xfbEntries.emplace_back();
+        entry.semanticName = so->SemanticName;
+        entry.semanticIndex = so->SemanticIndex;
+        entry.componentMask = ((1u << so->ComponentCount) - 1u) << so->StartComponent;
+        entry.stream = so->Stream;
+        entry.buffer = so->OutputSlot;
+        entry.offset = xfbOffsets.at(so->OutputSlot);
       }
 
-      xfb.strides[so->OutputSlot] += so->ComponentCount * sizeof(uint32_t);
+      xfbOffsets.at(so->OutputSlot) += so->ComponentCount * sizeof(uint32_t);
     }
     
     // If necessary, override the buffer strides
     for (uint32_t i = 0; i < NumStrides; i++)
-      xfb.strides[i] = pBufferStrides[i];
+      xfbOffsets.at(i) = pBufferStrides[i];
 
-    // Set stream to rasterize, if any
-    xfb.rasterizedStream = -1;
-    
-    if (RasterizedStream != D3D11_SO_NO_RASTERIZED_STREAM)
-      Logger::err("D3D11: CreateGeometryShaderWithStreamOutput: Rasterized stream not supported");
-    
-    // Compute hash from both the xfb info and the source
-    // code, because both influence the generated code
-    DxbcXfbInfo hashXfb = xfb;
-
-    std::vector<Sha1Data> chunks = {{
-      { pShaderBytecode, BytecodeLength  },
-      { &hashXfb,        sizeof(hashXfb) },
-    }};
-
-    for (uint32_t i = 0; i < hashXfb.entryCount; i++) {
-      const char* semantic = hashXfb.entries[i].semanticName;
-
-      if (semantic) {
-        chunks.push_back({ semantic, std::strlen(semantic) });
-        hashXfb.entries[i].semanticName = nullptr;
-      }
+    // Assign buffer stride to each entry
+    for (size_t i = 0u; i < moduleInfo.xfbEntries.size(); i++) {
+      auto& entry = moduleInfo.xfbEntries[i];
+      entry.stride = xfbOffsets.at(entry.buffer);
     }
 
-    Sha1Hash hash = Sha1Hash::compute(chunks.size(), chunks.data());
-    
     // Create the actual shader module
-    DxbcModuleInfo moduleInfo;
-    moduleInfo.options = m_dxbcOptions;
-    moduleInfo.tess    = nullptr;
-    moduleInfo.xfb     = &xfb;
+    auto shaderKey = ComputeShaderKey(VK_SHADER_STAGE_GEOMETRY_BIT,
+      pShaderBytecode, BytecodeLength, pSODeclaration, NumEntries,
+      pBufferStrides, NumStrides, RasterizedStream);
     
-    HRESULT hr = CreateShaderModule(&module,
-      DxvkShaderKey(VK_SHADER_STAGE_GEOMETRY_BIT, hash),
-      pShaderBytecode, BytecodeLength, pClassLinkage,
-      &moduleInfo);
+    HRESULT hr = CreateShaderModule(&module, shaderKey,
+      pShaderBytecode, BytecodeLength, moduleInfo);
 
     if (FAILED(hr))
       return E_INVALIDARG;
@@ -949,19 +922,12 @@ namespace dxvk {
     InitReturnPtr(ppPixelShader);
     D3D11CommonShader module;
     
-    DxbcModuleInfo moduleInfo;
-    moduleInfo.options = m_dxbcOptions;
-    moduleInfo.tess    = nullptr;
-    moduleInfo.xfb     = nullptr;
-
-    Sha1Hash hash = Sha1Hash::compute(
-      pShaderBytecode, BytecodeLength);
-    
+    DxvkIrShaderCreateInfo moduleInfo = { };
+    moduleInfo.options = m_shaderOptions;
 
     HRESULT hr = CreateShaderModule(&module,
-      DxvkShaderKey(VK_SHADER_STAGE_FRAGMENT_BIT, hash),
-      pShaderBytecode, BytecodeLength, pClassLinkage,
-      &moduleInfo);
+      ComputeShaderKey(VK_SHADER_STAGE_FRAGMENT_BIT, pShaderBytecode, BytecodeLength),
+      pShaderBytecode, BytecodeLength, moduleInfo);
 
     if (FAILED(hr))
       return hr;
@@ -982,23 +948,12 @@ namespace dxvk {
     InitReturnPtr(ppHullShader);
     D3D11CommonShader module;
     
-    DxbcTessInfo tessInfo;
-    tessInfo.maxTessFactor = float(m_d3d11Options.maxTessFactor);
+    DxvkIrShaderCreateInfo moduleInfo = { };
+    moduleInfo.options = m_shaderOptions;
 
-    DxbcModuleInfo moduleInfo;
-    moduleInfo.options = m_dxbcOptions;
-    moduleInfo.tess    = nullptr;
-    moduleInfo.xfb     = nullptr;
-
-    if (tessInfo.maxTessFactor >= 8.0f)
-      moduleInfo.tess = &tessInfo;
-
-    Sha1Hash hash = Sha1Hash::compute(
-      pShaderBytecode, BytecodeLength);
-    
     HRESULT hr = CreateShaderModule(&module,
-      DxvkShaderKey(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, hash),
-      pShaderBytecode, BytecodeLength, pClassLinkage, &moduleInfo);
+      ComputeShaderKey(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, pShaderBytecode, BytecodeLength),
+      pShaderBytecode, BytecodeLength, moduleInfo);
 
     if (FAILED(hr))
       return hr;
@@ -1019,17 +974,12 @@ namespace dxvk {
     InitReturnPtr(ppDomainShader);
     D3D11CommonShader module;
     
-    DxbcModuleInfo moduleInfo;
-    moduleInfo.options = m_dxbcOptions;
-    moduleInfo.tess    = nullptr;
-    moduleInfo.xfb     = nullptr;
+    DxvkIrShaderCreateInfo moduleInfo = { };
+    moduleInfo.options = m_shaderOptions;
 
-    Sha1Hash hash = Sha1Hash::compute(
-      pShaderBytecode, BytecodeLength);
-    
     HRESULT hr = CreateShaderModule(&module,
-      DxvkShaderKey(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, hash),
-      pShaderBytecode, BytecodeLength, pClassLinkage, &moduleInfo);
+      ComputeShaderKey(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, pShaderBytecode, BytecodeLength),
+      pShaderBytecode, BytecodeLength, moduleInfo);
 
     if (FAILED(hr))
       return hr;
@@ -1050,18 +1000,12 @@ namespace dxvk {
     InitReturnPtr(ppComputeShader);
     D3D11CommonShader module;
     
-    DxbcModuleInfo moduleInfo;
-    moduleInfo.options = m_dxbcOptions;
-    moduleInfo.tess    = nullptr;
-    moduleInfo.xfb     = nullptr;
+    DxvkIrShaderCreateInfo moduleInfo = { };
+    moduleInfo.options = m_shaderOptions;
 
-    Sha1Hash hash = Sha1Hash::compute(
-      pShaderBytecode, BytecodeLength);
-    
     HRESULT hr = CreateShaderModule(&module,
-      DxvkShaderKey(VK_SHADER_STAGE_COMPUTE_BIT, hash),
-      pShaderBytecode, BytecodeLength, pClassLinkage,
-      &moduleInfo);
+      ComputeShaderKey(VK_SHADER_STAGE_COMPUTE_BIT, pShaderBytecode, BytecodeLength),
+      pShaderBytecode, BytecodeLength, moduleInfo);
 
     if (FAILED(hr))
       return hr;
@@ -1929,47 +1873,252 @@ namespace dxvk {
   
   HRESULT D3D11Device::CreateShaderModule(
           D3D11CommonShader*      pShaderModule,
-          DxvkShaderKey           ShaderKey,
+    const DxvkShaderHash&         ShaderKey,
     const void*                   pShaderBytecode,
           size_t                  BytecodeLength,
-          ID3D11ClassLinkage*     pClassLinkage,
-    const DxbcModuleInfo*         pModuleInfo) {
+    const DxvkIrShaderCreateInfo& ModuleInfo) {
     if (!BytecodeLength || !pShaderBytecode)
       return E_INVALIDARG;
 
-    if (pClassLinkage != nullptr)
-      Logger::warn("D3D11Device::CreateShaderModule: Class linkage not supported");
+    // Ensure that the built-in hash is valid for the given binary.
+    // Somewhat relevant for us because we use the hash as a way to
+    // deduplicate and also tag shaders.
+    dxbc_spv::dxbc::Container container(pShaderBytecode, BytecodeLength);
 
+    if (!container.validateHash()) {
+      Logger::err("D3D11: Shader hash validation failed");
+      return E_INVALIDARG;
+    }
+
+    // Parse dxbc binary and I/O signatures and validate that all
+    // features used by the shader are enabled on the device
+    dxbc_spv::dxbc::Parser parser(container.getCodeChunk());
+    dxbc_spv::dxbc::ShaderInfo shaderInfo = parser.getShaderInfo();
+
+    auto [hi, lo] = shaderInfo.getVersion();
+
+    if ((hi > 5u) || (hi == 5u && lo) || (hi == 4u && lo > 1u) || hi < 4u)
+      throw DxvkError(str::format("Invalid shader model: ", hi, "_", lo));
+
+    // Check whether the stage matches or if we can create a pass-through GS
+    auto shaderStage = [] (dxbc_spv::dxbc::ShaderType type) {
+      switch (type) {
+        case dxbc_spv::dxbc::ShaderType::eVertex:   return VK_SHADER_STAGE_VERTEX_BIT;
+        case dxbc_spv::dxbc::ShaderType::eHull:     return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+        case dxbc_spv::dxbc::ShaderType::eDomain:   return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+        case dxbc_spv::dxbc::ShaderType::eGeometry: return VK_SHADER_STAGE_GEOMETRY_BIT;
+        case dxbc_spv::dxbc::ShaderType::ePixel:    return VK_SHADER_STAGE_FRAGMENT_BIT;
+        case dxbc_spv::dxbc::ShaderType::eCompute:  return VK_SHADER_STAGE_COMPUTE_BIT;
+      }
+
+      return VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM;
+    } (shaderInfo.getType());
+
+    if (ShaderKey.stage() != shaderStage) {
+      bool mismatch = !ShaderKey.hasXfb() || (
+        shaderStage != VK_SHADER_STAGE_VERTEX_BIT &&
+        shaderStage != VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
+
+      if (mismatch) {
+        Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Source shader is of incompatible type: ", shaderInfo.getType()));
+        return E_INVALIDARG;
+      }
+    }
+
+    DxbcBindingMask bindingMask;
+
+    while (parser) {
+      auto op = parser.parseInstruction();
+
+      if (!op)
+        return E_INVALIDARG;
+
+      switch (op.getOpToken().getOpCode()) {
+        case dxbc_spv::dxbc::OpCode::eDclSampler: {
+          uint32_t index = op.getDst(0u).getIndex(0u);
+          bindingMask.samplerMask |= 1u << index;
+        } break;
+
+        case dxbc_spv::dxbc::OpCode::eDclConstantBuffer: {
+          uint32_t index = op.getDst(0u).getIndex(0u);
+          bindingMask.cbvMask |= 1u << index;
+        } break;
+
+        case dxbc_spv::dxbc::OpCode::eDclResource:
+        case dxbc_spv::dxbc::OpCode::eDclResourceRaw:
+        case dxbc_spv::dxbc::OpCode::eDclResourceStructured: {
+          uint32_t index = op.getDst(0u).getIndex(0u);
+          bindingMask.srvMask.at(index / 64u) |= uint64_t(1u) << (index % 64u);
+        } break;
+
+        case dxbc_spv::dxbc::OpCode::eDclUavTyped:
+        case dxbc_spv::dxbc::OpCode::eDclUavRaw:
+        case dxbc_spv::dxbc::OpCode::eDclUavStructured: {
+          uint32_t index = op.getDst(0u).getIndex(0u);
+          bindingMask.uavMask |= uint64_t(1u) << index;
+        } break;
+
+        case dxbc_spv::dxbc::OpCode::eDclInput:
+        case dxbc_spv::dxbc::OpCode::eDclInputSgv:
+        case dxbc_spv::dxbc::OpCode::eDclInputSiv:
+        case dxbc_spv::dxbc::OpCode::eDclInputPs:
+        case dxbc_spv::dxbc::OpCode::eDclInputPsSgv:
+        case dxbc_spv::dxbc::OpCode::eDclInputPsSiv: {
+          const auto& dst = op.getDst(0u);
+
+          if (dst.getRegisterType() == dxbc_spv::dxbc::RegisterType::eInnerCoverage) {
+            if (m_deviceFeatures.GetConservativeRasterizationTier() < D3D11_CONSERVATIVE_RASTERIZATION_TIER_2) {
+              Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Shader uses innser coverage, but feature is not supported."));
+              return E_INVALIDARG;
+            }
+          }
+        } break;
+
+        case dxbc_spv::dxbc::OpCode::eDclOutputSgv:
+        case dxbc_spv::dxbc::OpCode::eDclOutputSiv: {
+          auto sysval = op.getImm(0u).getImmediate<dxbc_spv::dxbc::Sysval>(0u);
+
+          if ((sysval == dxbc_spv::dxbc::Sysval::eRenderTargetId || sysval == dxbc_spv::dxbc::Sysval::eViewportId)
+           && (shaderInfo.getType() == dxbc_spv::dxbc::ShaderType::eVertex || shaderInfo.getType() == dxbc_spv::dxbc::ShaderType::eDomain)) {
+            D3D11_FEATURE_DATA_D3D11_OPTIONS3 options3 = { };
+            m_deviceFeatures.GetFeatureData(D3D11_FEATURE_D3D11_OPTIONS3, sizeof(options3), &options3);
+
+            if (!options3.VPAndRTArrayIndexFromAnyShaderFeedingRasterizer) {
+              Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Shader uses viewport / layer, but feature is not supported."));
+              return E_INVALIDARG;
+            }
+          }
+        } [[fallthrough]];
+
+        case dxbc_spv::dxbc::OpCode::eDclOutput: {
+          const auto& dst = op.getDst(0u);
+
+          if (dst.getRegisterType() == dxbc_spv::dxbc::RegisterType::eStencilRef) {
+            if (m_deviceFeatures.GetConservativeRasterizationTier() < D3D11_CONSERVATIVE_RASTERIZATION_TIER_2) {
+              Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Shader exports stencil reference, but feature is not supported."));
+              return E_INVALIDARG;
+            }
+          }
+        } break;
+
+        case dxbc_spv::dxbc::OpCode::eDMov:
+        case dxbc_spv::dxbc::OpCode::eDMovc:
+        case dxbc_spv::dxbc::OpCode::eDAdd:
+        case dxbc_spv::dxbc::OpCode::eDMul:
+        case dxbc_spv::dxbc::OpCode::eDFma:
+        case dxbc_spv::dxbc::OpCode::eDDiv:
+        case dxbc_spv::dxbc::OpCode::eDRcp:
+        case dxbc_spv::dxbc::OpCode::eDMin:
+        case dxbc_spv::dxbc::OpCode::eDMax:
+        case dxbc_spv::dxbc::OpCode::eDtoF:
+        case dxbc_spv::dxbc::OpCode::eDtoI:
+        case dxbc_spv::dxbc::OpCode::eDtoU:
+        case dxbc_spv::dxbc::OpCode::eFtoD:
+        case dxbc_spv::dxbc::OpCode::eItoD:
+        case dxbc_spv::dxbc::OpCode::eUtoD:
+        case dxbc_spv::dxbc::OpCode::eDEq:
+        case dxbc_spv::dxbc::OpCode::eDNe:
+        case dxbc_spv::dxbc::OpCode::eDLt:
+        case dxbc_spv::dxbc::OpCode::eDGe: {
+          D3D11_FEATURE_DATA_DOUBLES doubles = { };
+          m_deviceFeatures.GetFeatureData(D3D11_FEATURE_DOUBLES, sizeof(doubles), &doubles);
+
+          if (!doubles.DoublePrecisionFloatShaderOps) {
+            Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Shader uses fp64, but feature is not supported."));
+            return E_INVALIDARG;
+          }
+        } break;
+
+        case dxbc_spv::dxbc::OpCode::eGather4S:
+        case dxbc_spv::dxbc::OpCode::eGather4CS:
+        case dxbc_spv::dxbc::OpCode::eGather4PoS:
+        case dxbc_spv::dxbc::OpCode::eGather4PoCS:
+        case dxbc_spv::dxbc::OpCode::eLdS:
+        case dxbc_spv::dxbc::OpCode::eLdMsS:
+        case dxbc_spv::dxbc::OpCode::eLdUavTypedS:
+        case dxbc_spv::dxbc::OpCode::eLdRawS:
+        case dxbc_spv::dxbc::OpCode::eLdStructuredS:
+        case dxbc_spv::dxbc::OpCode::eSampleLS:
+        case dxbc_spv::dxbc::OpCode::eSampleClzS:
+        case dxbc_spv::dxbc::OpCode::eSampleClampS:
+        case dxbc_spv::dxbc::OpCode::eSampleBClampS:
+        case dxbc_spv::dxbc::OpCode::eSampleDClampS:
+        case dxbc_spv::dxbc::OpCode::eSampleCClampS:
+        case dxbc_spv::dxbc::OpCode::eCheckAccessFullyMapped: {
+          if (m_deviceFeatures.GetTiledResourcesTier() < D3D11_TILED_RESOURCES_TIER_2) {
+            Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Shader uses sparse residency, but TILED_RESOURCES_TIER_2 is not supported."));
+            return E_INVALIDARG;
+          }
+        } break;
+
+        default:
+          break;
+      }
+    }
+
+    // Initialize the actual shader
     D3D11CommonShader commonShader;
 
     HRESULT hr = m_shaderModules.GetShaderModule(this,
-      &ShaderKey, pModuleInfo, pShaderBytecode, BytecodeLength,
-      &commonShader);
+      ShaderKey, ModuleInfo, pShaderBytecode, BytecodeLength,
+      bindingMask, &commonShader);
 
     if (FAILED(hr))
       return hr;
 
-    auto shader = commonShader.GetShader();
-
-    if (shader->flags().test(DxvkShaderFlag::ExportsStencilRef)
-     && !m_dxvkDevice->features().extShaderStencilExport)
-      return E_INVALIDARG;
-
-    if (shader->flags().test(DxvkShaderFlag::ExportsViewportIndexLayerFromVertexStage)
-     && (!m_dxvkDevice->features().vk12.shaderOutputViewportIndex
-      || !m_dxvkDevice->features().vk12.shaderOutputLayer))
-      return E_INVALIDARG;
-
-    if (shader->flags().test(DxvkShaderFlag::UsesSparseResidency)
-     && !m_dxvkDevice->features().core.features.shaderResourceResidency)
-      return E_INVALIDARG;
-
-    if (shader->flags().test(DxvkShaderFlag::UsesFragmentCoverage)
-     && !m_dxvkDevice->properties().extConservativeRasterization.fullyCoveredFragmentShaderInputVariable)
-      return E_INVALIDARG;
-
     *pShaderModule = std::move(commonShader);
     return S_OK;
+  }
+
+
+  DxvkShaderHash D3D11Device::ComputeShaderKey(
+          VkShaderStageFlagBits   Stage,
+    const void*                   pShaderBytecode,
+          size_t                  BytecodeLength) {
+    return ComputeShaderKey(Stage, pShaderBytecode, BytecodeLength, nullptr, 0u, nullptr, 0u, 0u);
+  }
+
+
+  DxvkShaderHash D3D11Device::ComputeShaderKey(
+          VkShaderStageFlagBits   Stage,
+    const void*                   pShaderBytecode,
+          size_t                  BytecodeLength,
+    const D3D11_SO_DECLARATION_ENTRY* pSODeclaration,
+          UINT                    NumEntries,
+    const UINT*                   pBufferStrides,
+          UINT                    NumStrides,
+          UINT                    RasterizedStream) {
+    dxbc_spv::dxbc::Container container(pShaderBytecode, BytecodeLength);
+    auto binHash = container.getHash();
+
+    if (!NumEntries) {
+      return DxvkShaderHash(Stage,
+        BytecodeLength, binHash.data.data(), binHash.data.size());
+    }
+
+    dxbc_spv::util::md5::Hasher xfbHasher;
+
+    for (uint32_t i = 0u; i < NumEntries; i++) {
+      xfbHasher.update(&pSODeclaration[i].Stream, sizeof(pSODeclaration[i].Stream));
+
+      if (pSODeclaration[i].SemanticName)
+        xfbHasher.update(pSODeclaration[i].SemanticName, std::strlen(pSODeclaration[i].SemanticName));
+
+      xfbHasher.update(&pSODeclaration[i].SemanticIndex, sizeof(pSODeclaration[i].SemanticIndex));
+      xfbHasher.update(&pSODeclaration[i].StartComponent, sizeof(pSODeclaration[i].StartComponent));
+      xfbHasher.update(&pSODeclaration[i].ComponentCount, sizeof(pSODeclaration[i].ComponentCount));
+      xfbHasher.update(&pSODeclaration[i].OutputSlot, sizeof(pSODeclaration[i].OutputSlot));
+    }
+
+    xfbHasher.update(pBufferStrides, sizeof(*pBufferStrides) * NumStrides);
+    xfbHasher.update(&RasterizedStream, sizeof(RasterizedStream));
+    xfbHasher.finalize();
+
+    auto xfbHash = xfbHasher.getDigest();
+
+    return DxvkShaderHash(Stage, BytecodeLength,
+      binHash.data.data(), binHash.data.size(),
+      xfbHash.data.data(), xfbHash.data.size());
   }
 
 
@@ -2151,7 +2300,7 @@ namespace dxvk {
       flags1 |= D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW;
       flags2 |= D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE;
       
-      if (m_dxbcOptions.supportsTypedUavLoadR32) {
+      if (!m_shaderOptions.compileOptions.flags.test(DxvkShaderCompileFlag::TypedR32LoadRequiresFormat)) {
         // If the R32 formats are supported without format declarations,
         // we can optionally support additional formats for typed loads
         if (imgFeatures & VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT)
@@ -2411,6 +2560,24 @@ namespace dxvk {
     }
 
     return feedback;
+  }
+
+
+  DxvkShaderOptions D3D11Device::GetShaderOptions(
+    const Rc<DxvkDevice>&             Device,
+    const D3D11Options&               Options) {
+    auto result = Device->getShaderCompileOptions();
+
+    if (Options.disableMsaa)
+      result.compileOptions.flags.set(DxvkShaderCompileFlag::DisableMsaa);
+
+    if (Options.forceVolatileTgsmAccess)
+      result.compileOptions.flags.set(DxvkShaderCompileFlag::InsertSharedMemoryBarriers);
+
+    if (Options.forceComputeUavBarriers)
+      result.compileOptions.flags.set(DxvkShaderCompileFlag::InsertResourceBarriers);
+
+    return result;
   }
 
 

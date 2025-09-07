@@ -19,7 +19,6 @@ namespace dxvk {
   : m_device        (device),
     m_stats         (&pipeMgr->m_stats),
     m_library       (library),
-    m_libraryHandle (VK_NULL_HANDLE),
     m_shaders       (std::move(shaders)),
     m_layout        (device, pipeMgr, m_shaders.cs->getLayout()),
     m_debugName     (createDebugName()) {
@@ -28,8 +27,7 @@ namespace dxvk {
   
   
   DxvkComputePipeline::~DxvkComputePipeline() {
-    if (m_libraryHandle)
-      m_library->releasePipelineHandle();
+    m_library->releasePipelineHandle();
 
     for (const auto& instance : m_pipelines)
       this->destroyPipeline(instance.handle);
@@ -38,16 +36,17 @@ namespace dxvk {
   
   VkPipeline DxvkComputePipeline::getPipelineHandle(
     const DxvkComputePipelineStateInfo& state) {
-    if (m_libraryHandle) {
-      // Compute pipelines without spec constants are always
-      // pre-compiled, so we'll almost always hit this path
-      return m_libraryHandle;
-    } else if (m_library) {
+    if (!m_libraryHandle) {
       // Retrieve actual pipeline handle on first use. This
       // may wait for an ongoing compile job to finish, or
       // compile the pipeline immediately on the calling thread.
       m_libraryHandle = m_library->acquirePipelineHandle().handle;
-      return m_libraryHandle;
+    }
+
+    if (*m_libraryHandle) {
+      // Compute pipelines without spec constants are always
+      // pre-compiled, so we'll almost always hit this path
+      return *m_libraryHandle;
     } else {
       // Slow path for compute shaders that do use spec constants
       DxvkComputePipelineInstance* instance = this->findInstance(state);
@@ -100,11 +99,11 @@ namespace dxvk {
     const DxvkComputePipelineStateInfo& state) const {
     auto vk = m_device->vkd();
 
-    DxvkPipelineSpecConstantState scState(m_shaders.cs->getSpecConstantMask(), state.sc);
+    DxvkPipelineSpecConstantState scState(m_shaders.cs->metadata().specConstantMask, state.sc);
     
     DxvkShaderStageInfo stageInfo(m_device);
     stageInfo.addStage(VK_SHADER_STAGE_COMPUTE_BIT, 
-      m_shaders.cs->getCode(m_layout.getBindingMap(DxvkPipelineLayoutType::Merged), DxvkShaderModuleCreateInfo()),
+      m_shaders.cs->getCode(m_layout.getBindingMap(DxvkPipelineLayoutType::Merged), nullptr),
       &scState.scInfo);
 
     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };

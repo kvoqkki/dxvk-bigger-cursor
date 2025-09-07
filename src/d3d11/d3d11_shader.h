@@ -4,7 +4,11 @@
 #include <unordered_map>
 
 #include "../dxbc/dxbc_module.h"
+
 #include "../dxvk/dxvk_device.h"
+#include "../dxvk/dxvk_shader.h"
+#include "../dxvk/dxvk_shader_key.h"
+#include "../dxvk/dxvk_shader_ir.h"
 
 #include "../d3d10/d3d10_shader.h"
 
@@ -20,6 +24,58 @@ namespace dxvk {
   class D3D11Device;
 
   /**
+   * \brief Shader resource mapping
+   *
+   * Helper class to compute backend resource
+   * indices for D3D11 binding slots.
+   */
+  struct D3D11ShaderResourceMapping {
+    static constexpr uint32_t StageCount        = 6u;
+    static constexpr uint32_t CbvPerStage       = 16u;
+    static constexpr uint32_t SamplersPerStage  = 16u;
+    static constexpr uint32_t SrvPerStage       = 128u;
+    static constexpr uint32_t SrvTotal          = SrvPerStage * StageCount;
+    static constexpr uint32_t UavPerPipeline    = 64u;
+    static constexpr uint32_t UavTotal          = UavPerPipeline * 4u;
+    static constexpr uint32_t UavIndexGraphics  = DxbcSrvTotal;
+    static constexpr uint32_t UavIndexCompute   = UavIndexGraphics + DxbcUavPerPipeline * 2u;
+
+    static uint32_t computeCbvBinding(dxbc_spv::ir::ShaderStage stage, uint32_t index) {
+      return computeStageIndex(stage) * CbvPerStage + index;
+    }
+
+    static uint32_t computeSamplerBinding(dxbc_spv::ir::ShaderStage stage, uint32_t index) {
+      return computeStageIndex(stage) * SamplersPerStage + index;
+    }
+
+    static uint32_t computeSrvBinding(dxbc_spv::ir::ShaderStage stage, uint32_t index) {
+      return computeStageIndex(stage) * SrvPerStage + index;
+    }
+
+    static uint32_t computeUavBinding(dxbc_spv::ir::ShaderStage stage, uint32_t index) {
+      return (stage == dxbc_spv::ir::ShaderStage::eCompute ? UavIndexCompute : UavIndexGraphics) + index;
+    }
+
+    static uint32_t computeUavCounterBinding(dxbc_spv::ir::ShaderStage stage, uint32_t index) {
+      return computeUavBinding(stage, index) + UavPerPipeline;
+    }
+
+    static uint32_t computeStageIndex(dxbc_spv::ir::ShaderStage stage) {
+      switch (stage) {
+        case dxbc_spv::ir::ShaderStage::ePixel:     return 0u;
+        case dxbc_spv::ir::ShaderStage::eVertex:    return 1u;
+        case dxbc_spv::ir::ShaderStage::eGeometry:  return 2u;
+        case dxbc_spv::ir::ShaderStage::eHull:      return 3u;
+        case dxbc_spv::ir::ShaderStage::eDomain:    return 4u;
+        case dxbc_spv::ir::ShaderStage::eCompute:   return 5u;
+        default:                                    return -1u;
+      }
+    }
+
+  };
+
+
+  /**
    * \brief Common shader object
    * 
    * Stores the compiled SPIR-V shader and the SHA-1
@@ -32,11 +88,12 @@ namespace dxvk {
     
     D3D11CommonShader();
     D3D11CommonShader(
-            D3D11Device*    pDevice,
-      const DxvkShaderKey*  pShaderKey,
-      const DxbcModuleInfo* pDxbcModuleInfo,
-      const void*           pShaderBytecode,
-            size_t          BytecodeLength);
+            D3D11Device*            pDevice,
+      const DxvkShaderHash&         ShaderKey,
+      const DxvkIrShaderCreateInfo& ModuleInfo,
+      const void*                   pShaderBytecode,
+            size_t                  BytecodeLength,
+      const DxbcBindingMask&        BindingMask);
     ~D3D11CommonShader();
 
     Rc<DxvkShader> GetShader() const {
@@ -64,38 +121,18 @@ namespace dxvk {
 
     DxbcBindingMask m_bindings = { };
 
-  };
+    void CreateIrShader(
+      const DxvkShaderHash&         ShaderKey,
+      const DxvkIrShaderCreateInfo& ModuleInfo,
+      const void*                   pShaderBytecode,
+            size_t                  BytecodeLength);
 
-
-  /**
-   * \brief Extended shader interface
-   */
-  class D3D11ExtShader : public ID3D11VkExtShader {
-
-  public:
-
-    D3D11ExtShader(
-            ID3D11DeviceChild*      pParent,
-            D3D11CommonShader*      pShader);
-
-    ~D3D11ExtShader();
-
-    ULONG STDMETHODCALLTYPE AddRef();
-
-    ULONG STDMETHODCALLTYPE Release();
-
-    HRESULT STDMETHODCALLTYPE QueryInterface(
-            REFIID                  riid,
-            void**                  ppvObject);
-
-    HRESULT STDMETHODCALLTYPE GetSpirvCode(
-            SIZE_T*                 pCodeSize,
-            void*                   pCode);
-
-  private:
-
-    ID3D11DeviceChild*  m_parent;
-    D3D11CommonShader*  m_shader;
+    void CreateLegacyShader(
+            D3D11Device*            pDevice,
+      const DxvkShaderHash&         ShaderKey,
+      const DxvkIrShaderCreateInfo& ModuleInfo,
+      const void*                   pShaderBytecode,
+            size_t                  BytecodeLength);
 
   };
 
@@ -114,7 +151,7 @@ namespace dxvk {
     
     D3D11Shader(D3D11Device* device, const D3D11CommonShader& shader)
     : D3D11DeviceChild<D3D11Interface>(device),
-      m_shader(shader), m_d3d10(this), m_shaderExt(this, &m_shader),
+      m_shader(shader), m_d3d10(this),
       m_destructionNotifier(this) { }
     
     ~D3D11Shader() { }
@@ -133,11 +170,6 @@ namespace dxvk {
        || riid == __uuidof(ID3D10DeviceChild)
        || riid == __uuidof(D3D10Interface)) {
         *ppvObject = ref(&m_d3d10);
-        return S_OK;
-      }
-
-      if (riid == __uuidof(ID3D11VkExtShader)) {
-        *ppvObject = ref(&m_shaderExt);
         return S_OK;
       }
 
@@ -166,7 +198,6 @@ namespace dxvk {
     
     D3D11CommonShader m_shader;
     D3D10ShaderClass  m_d3d10;
-    D3D11ExtShader    m_shaderExt;
 
     D3DDestructionNotifier m_destructionNotifier;
     
@@ -196,19 +227,20 @@ namespace dxvk {
     ~D3D11ShaderModuleSet();
     
     HRESULT GetShaderModule(
-            D3D11Device*        pDevice,
-      const DxvkShaderKey*      pShaderKey,
-      const DxbcModuleInfo*     pDxbcModuleInfo,
-      const void*               pShaderBytecode,
-            size_t              BytecodeLength,
-            D3D11CommonShader*  pShader);
+            D3D11Device*            pDevice,
+      const DxvkShaderHash&         ShaderKey,
+      const DxvkIrShaderCreateInfo& ModuleInfo,
+      const void*                   pShaderBytecode,
+            size_t                  BytecodeLength,
+      const DxbcBindingMask&        BindingMask,
+            D3D11CommonShader*      pShader);
     
   private:
     
     dxvk::mutex m_mutex;
     
     std::unordered_map<
-      DxvkShaderKey,
+      DxvkShaderHash,
       D3D11CommonShader,
       DxvkHash, DxvkEq> m_modules;
     
