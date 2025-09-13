@@ -60,7 +60,7 @@ namespace dxvk {
     , m_stagingBufferFence ( new sync::Fence() )
     , m_d3d9Options        ( dxvkDevice, pParent->GetInstance()->config() )
     , m_multithread        ( BehaviorFlags & D3DCREATE_MULTITHREADED )
-    , m_isSWVP             ( (BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) ? true : false )
+    , m_isSWVP             ( (BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) != 0 )
     , m_isD3D8Compatible   ( pParent->IsD3D8Compatible() )
     , m_csThread           ( dxvkDevice, dxvkDevice->createContext() )
     , m_csChunk            ( AllocCsChunk() )
@@ -197,6 +197,8 @@ namespace dxvk {
     m_flags.set(D3D9DeviceFlag::DirtyPointScale);
 
     m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+    
+    m_specInfo.set<SpecDrefScaling, uint32_t>(m_d3d9Options.drefScaling);
 
     hqxInit();
 
@@ -1263,26 +1265,35 @@ namespace dxvk {
       return D3DERR_INVALIDCALL;
 
     const Rc<DxvkImage> dstImage  = dstTexInfo->GetImage();
-    uint32_t mipLevels = dstTexInfo->IsAutomaticMip() ? 1 : dstTexInfo->Desc()->MipLevels;
+    uint32_t srcMipLevels = srcTexInfo->IsAutomaticMip() ? 1 : srcTexInfo->Desc()->MipLevels;
+    uint32_t dstMipLevels = dstTexInfo->IsAutomaticMip() ? 1 : dstTexInfo->Desc()->MipLevels;
     uint32_t arraySlices = std::min(srcTexInfo->Desc()->ArraySize, dstTexInfo->Desc()->ArraySize);
 
     uint32_t srcMipOffset = 0;
     VkExtent3D srcFirstMipExtent = srcTexInfo->GetExtent();
     VkExtent3D dstFirstMipExtent = dstTexInfo->GetExtent();
 
-    if (srcFirstMipExtent != dstFirstMipExtent) {
-      // UpdateTexture can be used with textures that have different mip lengths.
-      // It will either match the the top mips or the bottom ones.
-      // If the largest mip maps don't match in size, we try to take the smallest ones
-      // of the source.
+    if (srcMipLevels > 1 || dstMipLevels > 1) {
+      // UpdateTexture does not validate dimensions for textures with only one mip
+      if (srcFirstMipExtent != dstFirstMipExtent) {
+        // UpdateTexture can be used with textures that have different mip lengths.
+        // It will either match the the top mips or the bottom ones.
+        // If the largest mip maps don't match in size, we try to take the smallest ones
+        // of the source.
 
-      srcMipOffset = srcTexInfo->Desc()->MipLevels - mipLevels;
-      srcFirstMipExtent = util::computeMipLevelExtent(srcTexInfo->GetExtent(), srcMipOffset);
-      dstFirstMipExtent = dstTexInfo->GetExtent();
+        srcMipOffset = srcTexInfo->Desc()->MipLevels - dstMipLevels;
+        srcFirstMipExtent = util::computeMipLevelExtent(srcTexInfo->GetExtent(), srcMipOffset);
+        dstFirstMipExtent = dstTexInfo->GetExtent();
+      }
+
+      if (srcFirstMipExtent != dstFirstMipExtent)
+        return D3DERR_INVALIDCALL;
+    } else {
+      if (unlikely(srcFirstMipExtent.width  > dstFirstMipExtent.width
+                || srcFirstMipExtent.height > dstFirstMipExtent.height
+                || srcFirstMipExtent.depth  > dstFirstMipExtent.depth))
+        Logger::warn("D3D9DeviceEx::UpdateTexture: Source dimensions exceed the destination");
     }
-
-    if (srcFirstMipExtent != dstFirstMipExtent)
-      return D3DERR_INVALIDCALL;
 
     for (uint32_t a = 0; a < arraySlices; a++) {
       // The docs claim that the dirty box is just a performance optimization, however in practice games rely on it.
@@ -1298,7 +1309,7 @@ namespace dxvk {
       };
       VkOffset3D mip0Offset = { int32_t(box.Left), int32_t(box.Top), int32_t(box.Front) };
 
-      for (uint32_t dstMip = 0; dstMip < mipLevels; dstMip++) {
+      for (uint32_t dstMip = 0; dstMip < dstMipLevels; dstMip++) {
         // Scale the dirty box for the respective mip level
         uint32_t srcMip = dstMip + srcMipOffset;
         uint32_t srcSubresource = srcTexInfo->CalcSubresource(a, srcMip);
@@ -1315,7 +1326,7 @@ namespace dxvk {
     }
 
     srcTexInfo->ClearDirtyBoxes();
-    if (dstTexInfo->IsAutomaticMip() && mipLevels != dstTexInfo->Desc()->MipLevels)
+    if (dstTexInfo->IsAutomaticMip() && dstMipLevels != dstTexInfo->Desc()->MipLevels)
       MarkTextureMipsDirty(dstTexInfo);
 
     ConsiderFlush(GpuFlushType::ImplicitWeakHint);
@@ -4768,8 +4779,8 @@ namespace dxvk {
         m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
     }
 
-    bool oldTextureIsCube = oldTexture != nullptr ? oldTexture->IsCube() : false;
-    bool newTextureIsCube = newTexture != nullptr ? newTexture->IsCube() : false;
+    bool oldTextureIsCube = oldTexture != nullptr && oldTexture->IsCube();
+    bool newTextureIsCube = newTexture != nullptr && newTexture->IsCube();
     if (unlikely(oldTextureIsCube != newTextureIsCube)) {
       m_textureSlotTracking.samplerStateDirty |= 1u << StateSampler;
     }
@@ -6515,12 +6526,8 @@ namespace dxvk {
 
       // In fixed function shaders and SM < 2 we put the type mask
       // into a spec constant to select the used sampler type.
-      const uint32_t oldTextureTypes = m_textureSlotTracking.textureType;
       m_textureSlotTracking.textureType &= ~textureBitMask;
       m_textureSlotTracking.textureType |=  textureBits;
-      if (oldTextureTypes != m_textureSlotTracking.textureType) {
-        m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
-      }
     }
 
     if (likely(tex != nullptr)) {
@@ -7752,27 +7759,46 @@ namespace dxvk {
     if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyInputLayout)))
       BindInputLayout();
 
+    uint32_t projected = m_textureSlotTracking.projected;
     if (likely(UseProgrammablePS())) {
       UploadConstants<DxsoProgramTypes::PixelShader>();
 
       const uint32_t psTextureMask = usedTextureMask & ((1u << caps::MaxTexturesPS) - 1u);
       const uint32_t fetch4        = m_textureSlotTracking.fetch4    & psTextureMask;
-      const uint32_t projected     = m_textureSlotTracking.projected & psTextureMask;
+      uint32_t textureTypes        = m_textureSlotTracking.textureType;
 
       const auto& programInfo = GetCommonShader(m_state.pixelShader)->GetInfo();
+      const bool useProgrammableVS = UseProgrammableVS();
 
-      if (programInfo.majorVersion() >= 2)
-        UpdatePixelShaderSamplerSpec(m_d3d9Options.forceSamplerTypeSpecConstants ? m_textureSlotTracking.textureType : 0u, 0u, fetch4);
-      else
-        UpdatePixelShaderSamplerSpec(m_textureSlotTracking.textureType, programInfo.minorVersion() >= 4 ? 0u : projected, fetch4); // For implicit samplers...
+      // Fixed function shaders use the projected spec constant too.
+      if (likely(useProgrammableVS && (programInfo.majorVersion() > 2 || programInfo.minorVersion() > 3))) {
+        projected = 0u;
+      } else if (useProgrammableVS) {
+        // Programmable shaders can only sample textures in SM3 which doesn't use the projected state anymore.
+        // So we can restrict it to the ones that the pixel shader uses.
+        projected &= psTextureMask;
+      }
+
+      if (likely(programInfo.majorVersion() >= 2 && !m_d3d9Options.forceSamplerTypeSpecConstants)) {
+        // SM2 and up need to declare the sampler type in the shader.
+        textureTypes = 0u;
+      }
+
+      UpdatePixelShaderSamplerSpec(textureTypes, fetch4);
 
       UpdatePixelBoolSpec(
         m_state.psConsts->bConsts[0] &
         m_consts[DxsoProgramType::PixelShader].meta.boolConstantMask);
     }
     else {
+      // Fixed function shaders use the projected spec constant too.
+      if (likely(UseProgrammableVS())) {
+        const uint32_t psTextureMask = usedTextureMask & ((1u << 8u) - 1u);
+        projected &= psTextureMask;
+      }
+
       UpdatePixelBoolSpec(0);
-      UpdatePixelShaderSamplerSpec(0u, 0u, 0u);
+      UpdatePixelShaderSamplerSpec(m_textureSlotTracking.textureType, 0u);
 
       UpdateFixedFunctionPS();
     }
@@ -7780,7 +7806,7 @@ namespace dxvk {
     const uint32_t nullTextureMask = usedSamplerMask & ~usedTextureMask;
     const uint32_t depthTextureMask = m_textureSlotTracking.depth & usedTextureMask;
     const uint32_t drefClampMask = m_textureSlotTracking.drefClamp & depthTextureMask;
-    UpdateCommonSamplerSpec(nullTextureMask, depthTextureMask, drefClampMask);
+    UpdateCommonSamplerSpec(nullTextureMask, depthTextureMask, drefClampMask, projected);
 
     if (unlikely(m_flags.test(D3D9DeviceFlag::DirtySharedPixelShaderData))) {
       m_flags.clr(D3D9DeviceFlag::DirtySharedPixelShaderData);
@@ -8195,9 +8221,9 @@ namespace dxvk {
 
   void D3D9DeviceEx::UpdateFixedFunctionVS() {
     // Shader...
-    bool hasPositionT = m_state.vertexDecl != nullptr ? m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPositionT) : false;
-    bool hasBlendWeight    = m_state.vertexDecl != nullptr ? m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasBlendWeight)  : false;
-    bool hasBlendIndices   = m_state.vertexDecl != nullptr ? m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasBlendIndices) : false;
+    bool hasPositionT = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPositionT);
+    bool hasBlendWeight    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasBlendWeight);
+    bool hasBlendIndices   = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasBlendIndices);
 
     bool indexedVertexBlend = hasBlendIndices && m_state.renderStates[D3DRS_INDEXEDVERTEXBLENDENABLE];
 
@@ -8226,17 +8252,17 @@ namespace dxvk {
       m_flags.clr(D3D9DeviceFlag::DirtyFFVertexShader);
 
       D3D9FFShaderKeyVS key;
-      key.Data.Contents.HasPositionT = hasPositionT;
-      key.Data.Contents.HasColor0    = m_state.vertexDecl != nullptr ? m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor0)    : false;
-      key.Data.Contents.HasColor1    = m_state.vertexDecl != nullptr ? m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor1)    : false;
-      key.Data.Contents.HasPointSize = m_state.vertexDecl != nullptr ? m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPointSize) : false;
-      key.Data.Contents.HasFog       = m_state.vertexDecl != nullptr ? m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasFog)       : false;
+      key.Data.Contents.VertexHasPositionT = hasPositionT;
+      key.Data.Contents.VertexHasColor0    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor0);
+      key.Data.Contents.VertexHasColor1    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor1);
+      key.Data.Contents.VertexHasPointSize = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPointSize);
+      key.Data.Contents.VertexHasFog       = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasFog);
 
-      bool lighting    = m_state.renderStates[D3DRS_LIGHTING] != 0 && !key.Data.Contents.HasPositionT;
+      bool lighting    = m_state.renderStates[D3DRS_LIGHTING] != 0 && !key.Data.Contents.VertexHasPositionT;
       bool colorVertex = m_state.renderStates[D3DRS_COLORVERTEX] != 0;
       uint32_t mask    = (lighting && colorVertex)
-                       ? (key.Data.Contents.HasColor0 ? D3DMCS_COLOR1 : D3DMCS_MATERIAL)
-                       | (key.Data.Contents.HasColor1 ? D3DMCS_COLOR2 : D3DMCS_MATERIAL)
+                       ? (key.Data.Contents.VertexHasColor0 ? D3DMCS_COLOR1 : D3DMCS_MATERIAL)
+                       | (key.Data.Contents.VertexHasColor1 ? D3DMCS_COLOR2 : D3DMCS_MATERIAL)
                        : 0;
 
       key.Data.Contents.UseLighting      = lighting;
@@ -8272,7 +8298,6 @@ namespace dxvk {
         key.Data.Contents.TransformFlags  |= transformFlags << (i * 3);
         key.Data.Contents.TexcoordFlags   |= indexFlags     << (i * 3);
         key.Data.Contents.TexcoordIndices |= index          << (i * 3);
-        key.Data.Contents.Projected       |= ((m_state.textureStages[i][DXVK_TSS_TEXTURETRANSFORMFLAGS] & D3DTTFF_PROJECTED) == D3DTTFF_PROJECTED) << i;
       }
 
       key.Data.Contents.TexcoordDeclMask = m_state.vertexDecl != nullptr ? m_state.vertexDecl->GetTexcoordMask() : 0;
@@ -8871,10 +8896,10 @@ namespace dxvk {
     // We should do this...
     m_flags.set(D3D9DeviceFlag::DirtyInputLayout);
 
-    UpdatePixelShaderSamplerSpec(0u, 0u, 0u);
+    UpdatePixelShaderSamplerSpec(0u, 0u);
     UpdateVertexBoolSpec(0u);
     UpdatePixelBoolSpec(0u);
-    UpdateCommonSamplerSpec(0u, 0u, 0u);
+    UpdateCommonSamplerSpec(0u, 0u, 0u, 0u);
 
     UpdateAnyColorWrites<0>();
     UpdateAnyColorWrites<1>();
@@ -9138,20 +9163,20 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::UpdatePixelShaderSamplerSpec(uint32_t types, uint32_t projections, uint32_t fetch4) {
+  void D3D9DeviceEx::UpdatePixelShaderSamplerSpec(uint32_t types, uint32_t fetch4) {
     bool dirty  = m_specInfo.set<SpecSamplerType>(types);
-         dirty |= m_specInfo.set<SpecProjectionType>(projections);
-         dirty |= m_specInfo.set<SpecFetch4>(fetch4);
+         dirty |= m_specInfo.set<SpecSamplerFetch4>(fetch4);
 
     if (dirty)
       m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
   }
 
 
-  void D3D9DeviceEx::UpdateCommonSamplerSpec(uint32_t nullMask, uint32_t depthMask, uint32_t drefMask) {
+  void D3D9DeviceEx::UpdateCommonSamplerSpec(uint32_t nullMask, uint32_t depthMask, uint32_t drefMask, uint32_t projections) {
     bool dirty  = m_specInfo.set<SpecSamplerDepthMode>(depthMask);
          dirty |= m_specInfo.set<SpecSamplerNull>(nullMask);
-         dirty |= m_specInfo.set<SpecDrefClamp>(drefMask);
+         dirty |= m_specInfo.set<SpecSamplerDrefClamp>(drefMask);
+         dirty |= m_specInfo.set<SpecSamplerProjected>(projections);
 
     if (dirty)
       m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
