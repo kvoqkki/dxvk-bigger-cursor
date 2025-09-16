@@ -55,6 +55,7 @@ namespace dxvk {
     , m_dxvkDevice         ( dxvkDevice )
     , m_memoryAllocator    ( )
     , m_shaderAllocator    ( )
+    , m_ffModules          ( this )
     , m_shaderModules      ( new D3D9ShaderModuleSet )
     , m_stagingBuffer      ( dxvkDevice, StagingBufferSize )
     , m_stagingBufferFence ( new sync::Fence() )
@@ -191,7 +192,6 @@ namespace dxvk {
     m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
     m_flags.set(D3D9DeviceFlag::DirtyFFViewport);
     m_flags.set(D3D9DeviceFlag::DirtyFFPixelData);
-    m_flags.set(D3D9DeviceFlag::DirtyProgVertexShader);
     m_flags.set(D3D9DeviceFlag::DirtySharedPixelShaderData);
     m_flags.set(D3D9DeviceFlag::DirtyDepthBounds);
     m_flags.set(D3D9DeviceFlag::DirtyPointScale);
@@ -199,6 +199,9 @@ namespace dxvk {
     m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
     
     m_specInfo.set<SpecDrefScaling, uint32_t>(m_d3d9Options.drefScaling);
+
+    BindFFUbershader<DxsoProgramType::VertexShader>();
+    BindFFUbershader<DxsoProgramType::PixelShader>();
 
     hqxInit();
 
@@ -3544,11 +3547,12 @@ namespace dxvk {
 
     // We unbound the pixel shader before,
     // let's make sure that gets rebound.
-    m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
-
     if (m_state.pixelShader != nullptr) {
       BindShader<DxsoProgramTypes::PixelShader>(
         GetCommonShader(m_state.pixelShader));
+    } else {
+      m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
+      BindFFUbershader<DxsoProgramType::PixelShader>();
     }
 
     if (dst->GetMapMode() == D3D9_COMMON_BUFFER_MAP_MODE_BUFFER) {
@@ -3616,7 +3620,20 @@ namespace dxvk {
     if (dirtyFFShader)
       m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
 
+    const bool wasUsingProgrammableVS = UseProgrammableVS();
+
     m_state.vertexDecl = decl;
+
+    const bool usesProgrammableVS = UseProgrammableVS();
+
+    if (unlikely(usesProgrammableVS != wasUsingProgrammableVS)) {
+      if (usesProgrammableVS) {
+        BindShader<DxsoProgramType::VertexShader>(GetCommonShader(m_state.vertexShader));
+      } else {
+        m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+        BindFFUbershader<DxsoProgramType::VertexShader>();
+      }
+    }
 
     m_flags.set(D3D9DeviceFlag::DirtyInputLayout);
 
@@ -3735,15 +3752,19 @@ namespace dxvk {
         || newShader->GetMeta().maxConstIndexB > oldShader->GetMeta().maxConstIndexB;
     }
 
+    const bool wasUsingProgrammableVS = UseProgrammableVS();
+
     m_state.vertexShader = shader;
 
-    if (shader != nullptr) {
-      m_flags.clr(D3D9DeviceFlag::DirtyProgVertexShader);
-      m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+    const bool usesProgrammableVS = UseProgrammableVS();
 
+    if (usesProgrammableVS) {
       BindShader<DxsoProgramTypes::VertexShader>(GetCommonShader(shader));
 
       UpdateTextureTypeMismatchesForShader(newShader, VSShaderMasks().samplerMask, FirstVSSamplerSlot);
+    } else if (wasUsingProgrammableVS) {
+      m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+      BindFFUbershader<DxsoProgramType::VertexShader>();
     }
 
     m_flags.set(D3D9DeviceFlag::DirtyInputLayout);
@@ -4095,13 +4116,30 @@ namespace dxvk {
     const D3D9ShaderMasks newShaderMasks = PSShaderMasks();
 
     if (shader != nullptr) {
-      m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
-
       BindShader<DxsoProgramTypes::PixelShader>(newShader);
 
       UpdateTextureTypeMismatchesForShader(newShader, newShaderMasks.samplerMask, 0);
+
+      bool dirty = m_specInfo.set<D3D9SpecConstantId::SpecFFLastActiveTextureStage>(0u);
+      dirty |= m_specInfo.set<D3D9SpecConstantId::SpecFFGlobalSpecularEnabled>(0u);
+      constexpr uint32_t perTextureStageSpecConsts = static_cast<uint32_t>(D3D9SpecConstantId::SpecFFTextureStage1ColorOp) - static_cast<uint32_t>(D3D9SpecConstantId::SpecFFTextureStage0ColorOp);
+      for (uint32_t i = 0; i < 4; i++) {
+        dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorOp + perTextureStageSpecConsts * i), 0u);
+        dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg1 + perTextureStageSpecConsts * i), 0u);
+        dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg2 + perTextureStageSpecConsts * i), 0u);
+        dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaOp + perTextureStageSpecConsts * i), 0u);
+        dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg1 + perTextureStageSpecConsts * i), 0u);
+        dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg2 + perTextureStageSpecConsts * i), 0u);
+        dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ResultIsTemp + perTextureStageSpecConsts * i), 0u);
+      }
+      if (dirty) {
+        m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+      }
     }
     else {
+      m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
+      BindFFUbershader<DxsoProgramType::PixelShader>();
+
       // TODO: What fixed function textures are in use?
       // Currently we are making all 8 of them as in use here.
       // Fixed function always uses spec constants to decide the texture type.
@@ -7736,12 +7774,6 @@ namespace dxvk {
     UpdatePointMode(PrimitiveType == D3DPT_POINTLIST);
 
     if (likely(UseProgrammableVS())) {
-      if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyProgVertexShader))) {
-        m_flags.set(D3D9DeviceFlag::DirtyInputLayout);
-
-        BindShader<DxsoProgramType::VertexShader>(
-          GetCommonShader(m_state.vertexShader));
-      }
       UploadConstants<DxsoProgramTypes::VertexShader>();
 
       if (likely(!CanSWVP())) {
@@ -7942,6 +7974,26 @@ namespace dxvk {
       constexpr VkShaderStageFlagBits stage = GetShaderStage(ShaderStage);
       ctx->bindShader<stage>(std::move(cShader));
     });
+  }
+
+
+  template <DxsoProgramType ShaderStage>
+  void D3D9DeviceEx::BindFFUbershader() {
+    if (ShaderStage == DxsoProgramType::VertexShader) {
+      EmitCs([
+       &cShaders = m_ffModules
+      ](DxvkContext* ctx) {
+        auto shader = cShaders.GetVSUbershaderModule();
+        ctx->bindShader<VK_SHADER_STAGE_VERTEX_BIT>(shader.GetShader());
+      });
+    } else {
+      EmitCs([
+       &cShaders = m_ffModules
+      ](DxvkContext* ctx) {
+        auto shader = cShaders.GetFSUbershaderModule();
+        ctx->bindShader<VK_SHADER_STAGE_FRAGMENT_BIT>(shader.GetShader());
+      });
+    }
   }
 
 
@@ -8219,14 +8271,77 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::UpdateFixedFunctionVS() {
-    // Shader...
-    bool hasPositionT = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPositionT);
-    bool hasBlendWeight    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasBlendWeight);
-    bool hasBlendIndices   = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasBlendIndices);
+  D3D9FFShaderKeyVS D3D9DeviceEx::BuildFFKeyVS(D3D9FF_VertexBlendMode vertexBlendMode, bool indexedVertexBlend) const {
+    D3D9FFShaderKeyVS key;
+    key.Data.Contents.VertexHasPositionT = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPositionT);
+    key.Data.Contents.VertexHasColor0    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor0);
+    key.Data.Contents.VertexHasColor1    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor1);
+    key.Data.Contents.VertexHasPointSize = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPointSize);
+    key.Data.Contents.VertexHasFog       = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasFog);
+
+    bool lighting    = m_state.renderStates[D3DRS_LIGHTING] != 0 && !key.Data.Contents.VertexHasPositionT;
+    bool colorVertex = m_state.renderStates[D3DRS_COLORVERTEX] != 0;
+    uint32_t mask    = (lighting && colorVertex)
+                     ? (key.Data.Contents.VertexHasColor0 ? D3DMCS_COLOR1 : D3DMCS_MATERIAL)
+                     | (key.Data.Contents.VertexHasColor1 ? D3DMCS_COLOR2 : D3DMCS_MATERIAL)
+                     : 0;
+
+    key.Data.Contents.UseLighting      = lighting;
+    key.Data.Contents.NormalizeNormals = m_state.renderStates[D3DRS_NORMALIZENORMALS];
+    key.Data.Contents.LocalViewer      = m_state.renderStates[D3DRS_LOCALVIEWER] && lighting;
+
+    key.Data.Contents.RangeFog         = m_state.renderStates[D3DRS_RANGEFOGENABLE];
+
+    key.Data.Contents.DiffuseSource    = m_state.renderStates[D3DRS_DIFFUSEMATERIALSOURCE]  & mask;
+    key.Data.Contents.AmbientSource    = m_state.renderStates[D3DRS_AMBIENTMATERIALSOURCE]  & mask;
+    key.Data.Contents.SpecularSource   = m_state.renderStates[D3DRS_SPECULARMATERIALSOURCE] & mask;
+    key.Data.Contents.EmissiveSource   = m_state.renderStates[D3DRS_EMISSIVEMATERIALSOURCE] & mask;
+
+    uint32_t lightCount = 0;
+
+    if (key.Data.Contents.UseLighting) {
+      for (uint32_t i = 0; i < caps::MaxEnabledLights; i++) {
+        if (m_state.enabledLightIndices[i] != std::numeric_limits<uint32_t>::max())
+          lightCount++;
+      }
+    }
+
+    key.Data.Contents.LightCount = lightCount;
+
+    for (uint32_t i = 0; i < caps::MaxTextureBlendStages; i++) {
+      uint32_t transformFlags = m_state.textureStages[i][DXVK_TSS_TEXTURETRANSFORMFLAGS] & ~(D3DTTFF_PROJECTED);
+      uint32_t index          = m_state.textureStages[i][DXVK_TSS_TEXCOORDINDEX];
+      uint32_t indexFlags     = (index & TCIMask) >> TCIOffset;
+
+      transformFlags &= 0b111;
+      index          &= 0b111;
+
+      key.Data.Contents.TransformFlags  |= transformFlags << (i * 3);
+      key.Data.Contents.TexcoordFlags   |= indexFlags     << (i * 3);
+      key.Data.Contents.TexcoordIndices |= index          << (i * 3);
+    }
+
+    key.Data.Contents.VertexTexcoordDeclMask = m_state.vertexDecl != nullptr ? m_state.vertexDecl->GetTexcoordMask() : 0;
+
+    key.Data.Contents.VertexBlendMode  = uint32_t(vertexBlendMode);
+
+    if (vertexBlendMode == D3D9FF_VertexBlendMode_Normal) {
+      key.Data.Contents.VertexBlendIndexed = indexedVertexBlend;
+      key.Data.Contents.VertexBlendCount   = m_state.renderStates[D3DRS_VERTEXBLEND] & 0xff;
+    }
+
+    key.Data.Contents.VertexClipping = m_state.renderStates[D3DRS_CLIPPLANEENABLE] != 0;
+
+    return key;
+  }
+
+
+   void D3D9DeviceEx::UpdateFixedFunctionVS() {
+    bool hasPositionT    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPositionT);
+    bool hasBlendWeight  = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasBlendWeight);
+    bool hasBlendIndices = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasBlendIndices);
 
     bool indexedVertexBlend = hasBlendIndices && m_state.renderStates[D3DRS_INDEXEDVERTEXBLENDENABLE];
-
     D3D9FF_VertexBlendMode vertexBlendMode = D3D9FF_VertexBlendMode_Disabled;
 
     if (m_state.renderStates[D3DRS_VERTEXBLEND] != D3DVBF_DISABLE && !hasPositionT) {
@@ -8242,74 +8357,16 @@ namespace dxvk {
         vertexBlendMode = D3D9FF_VertexBlendMode_Disabled;
     }
 
-    if (unlikely(hasPositionT && m_state.vertexShader != nullptr && !m_flags.test(D3D9DeviceFlag::DirtyProgVertexShader))) {
-      m_flags.set(D3D9DeviceFlag::DirtyInputLayout);
-      m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
-      m_flags.set(D3D9DeviceFlag::DirtyProgVertexShader);
-    }
+    // Shader...
+    const bool useUbershader = m_d3d9Options.ffUbershaderVS;
 
-    if (m_flags.test(D3D9DeviceFlag::DirtyFFVertexShader)) {
+    if (useUbershader && m_flags.test(D3D9DeviceFlag::DirtyFFVertexShader)) {
+      m_flags.clr(D3D9DeviceFlag::DirtyFFVertexShader);
+      m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
+    } else if (m_flags.test(D3D9DeviceFlag::DirtyFFVertexShader)) {
       m_flags.clr(D3D9DeviceFlag::DirtyFFVertexShader);
 
-      D3D9FFShaderKeyVS key;
-      key.Data.Contents.VertexHasPositionT = hasPositionT;
-      key.Data.Contents.VertexHasColor0    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor0);
-      key.Data.Contents.VertexHasColor1    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor1);
-      key.Data.Contents.VertexHasPointSize = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPointSize);
-      key.Data.Contents.VertexHasFog       = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasFog);
-
-      bool lighting    = m_state.renderStates[D3DRS_LIGHTING] != 0 && !key.Data.Contents.VertexHasPositionT;
-      bool colorVertex = m_state.renderStates[D3DRS_COLORVERTEX] != 0;
-      uint32_t mask    = (lighting && colorVertex)
-                       ? (key.Data.Contents.VertexHasColor0 ? D3DMCS_COLOR1 : D3DMCS_MATERIAL)
-                       | (key.Data.Contents.VertexHasColor1 ? D3DMCS_COLOR2 : D3DMCS_MATERIAL)
-                       : 0;
-
-      key.Data.Contents.UseLighting      = lighting;
-      key.Data.Contents.NormalizeNormals = m_state.renderStates[D3DRS_NORMALIZENORMALS];
-      key.Data.Contents.LocalViewer      = m_state.renderStates[D3DRS_LOCALVIEWER] && lighting;
-
-      key.Data.Contents.RangeFog         = m_state.renderStates[D3DRS_RANGEFOGENABLE];
-
-      key.Data.Contents.DiffuseSource    = m_state.renderStates[D3DRS_DIFFUSEMATERIALSOURCE]  & mask;
-      key.Data.Contents.AmbientSource    = m_state.renderStates[D3DRS_AMBIENTMATERIALSOURCE]  & mask;
-      key.Data.Contents.SpecularSource   = m_state.renderStates[D3DRS_SPECULARMATERIALSOURCE] & mask;
-      key.Data.Contents.EmissiveSource   = m_state.renderStates[D3DRS_EMISSIVEMATERIALSOURCE] & mask;
-
-      uint32_t lightCount = 0;
-
-      if (key.Data.Contents.UseLighting) {
-        for (uint32_t i = 0; i < caps::MaxEnabledLights; i++) {
-          if (m_state.enabledLightIndices[i] != std::numeric_limits<uint32_t>::max())
-            lightCount++;
-        }
-      }
-
-      key.Data.Contents.LightCount = lightCount;
-
-      for (uint32_t i = 0; i < caps::MaxTextureBlendStages; i++) {
-        uint32_t transformFlags = m_state.textureStages[i][DXVK_TSS_TEXTURETRANSFORMFLAGS] & ~(D3DTTFF_PROJECTED);
-        uint32_t index          = m_state.textureStages[i][DXVK_TSS_TEXCOORDINDEX];
-        uint32_t indexFlags     = (index & TCIMask) >> TCIOffset;
-
-        transformFlags &= 0b111;
-        index          &= 0b111;
-
-        key.Data.Contents.TransformFlags  |= transformFlags << (i * 3);
-        key.Data.Contents.TexcoordFlags   |= indexFlags     << (i * 3);
-        key.Data.Contents.TexcoordIndices |= index          << (i * 3);
-      }
-
-      key.Data.Contents.TexcoordDeclMask = m_state.vertexDecl != nullptr ? m_state.vertexDecl->GetTexcoordMask() : 0;
-
-      key.Data.Contents.VertexBlendMode    = uint32_t(vertexBlendMode);
-
-      if (vertexBlendMode == D3D9FF_VertexBlendMode_Normal) {
-        key.Data.Contents.VertexBlendIndexed = indexedVertexBlend;
-        key.Data.Contents.VertexBlendCount   = m_state.renderStates[D3DRS_VERTEXBLEND] & 0xff;
-      }
-
-      key.Data.Contents.VertexClipping = m_state.renderStates[D3DRS_CLIPPLANEENABLE] != 0;
+      D3D9FFShaderKeyVS key = BuildFFKeyVS(vertexBlendMode, indexedVertexBlend);
 
       EmitCs([
         this,
@@ -8321,6 +8378,7 @@ namespace dxvk {
       });
     }
 
+    // Viewport...
     if (hasPositionT && (m_flags.test(D3D9DeviceFlag::DirtyFFViewport) || m_ffZTest != IsZTestEnabled())) {
       m_flags.clr(D3D9DeviceFlag::DirtyFFViewport);
       m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
@@ -8384,6 +8442,9 @@ namespace dxvk {
 
       data->Material = m_state.material;
       data->TweenFactor = bit::cast<float>(m_state.renderStates[D3DRS_TWEENFACTOR]);
+      if (useUbershader) {
+        data->Key = BuildFFKeyVS(vertexBlendMode, indexedVertexBlend).Data;
+      }
     }
 
     if (m_flags.test(D3D9DeviceFlag::DirtyFFVertexBlend) && vertexBlendMode == D3D9FF_VertexBlendMode_Normal) {
@@ -8402,89 +8463,133 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::UpdateFixedFunctionPS() {
-    // Shader...
-    if (m_flags.test(D3D9DeviceFlag::DirtyFFPixelShader)) {
-      m_flags.clr(D3D9DeviceFlag::DirtyFFPixelShader);
+  D3D9FFShaderKeyFS D3D9DeviceEx::BuildFFKeyFS() const {
+     // Used args for a given operation.
+    auto ArgsMask = [](DWORD Op) {
+      switch (Op) {
+        case D3DTOP_DISABLE:
+          return 0b000u; // No Args
+        case D3DTOP_SELECTARG1:
+        case D3DTOP_PREMODULATE:
+          return 0b010u; // Arg 1
+        case D3DTOP_SELECTARG2:
+          return 0b100u; // Arg 2
+        case D3DTOP_MULTIPLYADD:
+        case D3DTOP_LERP:
+          return 0b111u; // Arg 0, 1, 2
+        default:
+          return 0b110u; // Arg 1, 2
+      }
+    };
 
-      // Used args for a given operation.
-      auto ArgsMask = [](DWORD Op) {
-        switch (Op) {
-          case D3DTOP_DISABLE:
-            return 0b000u; // No Args
-          case D3DTOP_SELECTARG1:
-          case D3DTOP_PREMODULATE:
-            return 0b010u; // Arg 1
-          case D3DTOP_SELECTARG2:
-            return 0b100u; // Arg 2
-          case D3DTOP_MULTIPLYADD:
-          case D3DTOP_LERP:
-            return 0b111u; // Arg 0, 1, 2
-          default:
-            return 0b110u; // Arg 1, 2
-        }
+    D3D9FFShaderKeyFS key;
+
+    uint32_t activeTextureStageCount = 0;
+    for (uint32_t i = 0; i < caps::TextureStageCount; i++) {
+      auto& stage = key.Stages[i].Contents;
+      auto& data  = m_state.textureStages[i];
+
+      // Subsequent stages do not occur if this is true.
+      if (data[DXVK_TSS_COLOROP] == D3DTOP_DISABLE)
+        break;
+
+      // If the stage is invalid (ie. no texture bound),
+      // this and all subsequent stages get disabled.
+      if (m_state.textures[i] == nullptr) {
+        if (((data[DXVK_TSS_COLORARG0] & D3DTA_SELECTMASK) == D3DTA_TEXTURE && (ArgsMask(data[DXVK_TSS_COLOROP]) & (1 << 0u)))
+         || ((data[DXVK_TSS_COLORARG1] & D3DTA_SELECTMASK) == D3DTA_TEXTURE && (ArgsMask(data[DXVK_TSS_COLOROP]) & (1 << 1u)))
+         || ((data[DXVK_TSS_COLORARG2] & D3DTA_SELECTMASK) == D3DTA_TEXTURE && (ArgsMask(data[DXVK_TSS_COLOROP]) & (1 << 2u))))
+          break;
+      }
+
+      stage.ColorOp = data[DXVK_TSS_COLOROP];
+      stage.AlphaOp = data[DXVK_TSS_ALPHAOP];
+
+      stage.ColorArg0 = data[DXVK_TSS_COLORARG0];
+      stage.ColorArg1 = data[DXVK_TSS_COLORARG1];
+      stage.ColorArg2 = data[DXVK_TSS_COLORARG2];
+
+      stage.AlphaArg0 = data[DXVK_TSS_ALPHAARG0];
+      stage.AlphaArg1 = data[DXVK_TSS_ALPHAARG1];
+      stage.AlphaArg2 = data[DXVK_TSS_ALPHAARG2];
+
+      stage.ResultIsTemp = data[DXVK_TSS_RESULTARG] == D3DTA_TEMP;
+
+      activeTextureStageCount = i + 1;
+    }
+
+    auto& stage0 = key.Stages[0].Contents;
+
+    if (stage0.ResultIsTemp &&
+        stage0.ColorOp != D3DTOP_DISABLE &&
+        stage0.AlphaOp == D3DTOP_DISABLE) {
+      stage0.AlphaOp   = D3DTOP_SELECTARG1;
+      stage0.AlphaArg1 = D3DTA_DIFFUSE;
+    }
+
+    stage0.GlobalSpecularEnable = m_state.renderStates[D3DRS_SPECULARENABLE];
+
+    // The last stage *always* writes to current.
+    if (activeTextureStageCount >= 1)
+      key.Stages[activeTextureStageCount - 1].Contents.ResultIsTemp = false;
+
+    return key;
+  }
+
+
+  void D3D9DeviceEx::UpdateFixedFunctionPS() {
+    if (unlikely(!m_flags.test(D3D9DeviceFlag::DirtyFFPixelShader) && !m_flags.test(D3D9DeviceFlag::DirtyFFPixelData)))
+      return;
+
+    // Shader...
+    const bool useUbershader = m_d3d9Options.ffUbershaderFS;
+
+    D3D9FFShaderKeyFS key = BuildFFKeyFS();
+    if (useUbershader && m_flags.test(D3D9DeviceFlag::DirtyFFPixelShader)) {
+      // The flags are set based on the specialized shaders.
+      m_flags.clr(D3D9DeviceFlag::DirtyFFPixelShader);
+      m_flags.set(D3D9DeviceFlag::DirtyFFPixelData);
+
+      // Spec constants...
+      uint32_t activeTextureStageCount;
+      for (activeTextureStageCount = 0; activeTextureStageCount < caps::TextureStageCount; activeTextureStageCount++) {
+        auto& stage = key.Stages[activeTextureStageCount].Contents;
+        if (stage.ColorOp == D3DTOP_DISABLE)
+          break;
+      }
+
+      const auto repackArg = [](uint32_t arg) {
+        return (arg & 0b111u) | ((arg & 0b110000u) >> 1u);
       };
 
-      D3D9FFShaderKeyFS key;
-
-      uint32_t idx;
-      for (idx = 0; idx < caps::TextureStageCount; idx++) {
-        auto& stage = key.Stages[idx].Contents;
-        auto& data  = m_state.textureStages[idx];
-
-        // Subsequent stages do not occur if this is true.
-        if (data[DXVK_TSS_COLOROP] == D3DTOP_DISABLE)
-          break;
-
-        // If the stage is invalid (ie. no texture bound),
-        // this and all subsequent stages get disabled.
-        if (m_state.textures[idx] == nullptr) {
-          if (((data[DXVK_TSS_COLORARG0] & D3DTA_SELECTMASK) == D3DTA_TEXTURE && (ArgsMask(data[DXVK_TSS_COLOROP]) & (1 << 0u)))
-           || ((data[DXVK_TSS_COLORARG1] & D3DTA_SELECTMASK) == D3DTA_TEXTURE && (ArgsMask(data[DXVK_TSS_COLOROP]) & (1 << 1u)))
-           || ((data[DXVK_TSS_COLORARG2] & D3DTA_SELECTMASK) == D3DTA_TEXTURE && (ArgsMask(data[DXVK_TSS_COLOROP]) & (1 << 2u))))
-            break;
+      uint32_t lastActiveTextureStage = std::max(activeTextureStageCount, 1u) - 1u; // Subtract 1 to make it fit 3 bits
+      bool dirty = m_specInfo.set<D3D9SpecConstantId::SpecFFLastActiveTextureStage>(lastActiveTextureStage);
+      dirty |= m_specInfo.set<D3D9SpecConstantId::SpecFFGlobalSpecularEnabled>(key.Stages[0].Contents.GlobalSpecularEnable);
+      constexpr uint32_t perTextureStageSpecConsts = static_cast<uint32_t>(D3D9SpecConstantId::SpecFFTextureStage1ColorOp) - static_cast<uint32_t>(D3D9SpecConstantId::SpecFFTextureStage0ColorOp);
+      for (uint32_t i = 0; i < 4; i++) {
+        if (i <= activeTextureStageCount) {
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorOp + perTextureStageSpecConsts * i), key.Stages[i].Contents.ColorOp);
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg1 + perTextureStageSpecConsts * i), repackArg(key.Stages[i].Contents.ColorArg1));
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg2 + perTextureStageSpecConsts * i), repackArg(key.Stages[i].Contents.ColorArg2));
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaOp + perTextureStageSpecConsts * i), key.Stages[i].Contents.AlphaOp);
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg1 + perTextureStageSpecConsts * i), repackArg(key.Stages[i].Contents.AlphaArg1));
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg2 + perTextureStageSpecConsts * i), repackArg(key.Stages[i].Contents.AlphaArg2));
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ResultIsTemp + perTextureStageSpecConsts * i), key.Stages[i].Contents.ResultIsTemp);
+        } else {
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorOp + perTextureStageSpecConsts * i), 0);
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg1 + perTextureStageSpecConsts * i), 0);
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg2 + perTextureStageSpecConsts * i), 0);
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaOp + perTextureStageSpecConsts * i), 0);
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg1 + perTextureStageSpecConsts * i), 0);
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg2 + perTextureStageSpecConsts * i), 0);
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ResultIsTemp + perTextureStageSpecConsts * i), 0);
         }
-
-        stage.TextureBound = m_state.textures[idx] != nullptr ? 1 : 0;
-
-        stage.ColorOp = data[DXVK_TSS_COLOROP];
-        stage.AlphaOp = data[DXVK_TSS_ALPHAOP];
-
-        stage.ColorArg0 = data[DXVK_TSS_COLORARG0];
-        stage.ColorArg1 = data[DXVK_TSS_COLORARG1];
-        stage.ColorArg2 = data[DXVK_TSS_COLORARG2];
-
-        stage.AlphaArg0 = data[DXVK_TSS_ALPHAARG0];
-        stage.AlphaArg1 = data[DXVK_TSS_ALPHAARG1];
-        stage.AlphaArg2 = data[DXVK_TSS_ALPHAARG2];
-
-        const uint32_t samplerOffset = idx * 2;
-        stage.Type         = (m_textureSlotTracking.textureType >> samplerOffset) & 0xffu;
-        stage.ResultIsTemp = data[DXVK_TSS_RESULTARG] == D3DTA_TEMP;
-
-        uint32_t ttff  = data[DXVK_TSS_TEXTURETRANSFORMFLAGS];
-        uint32_t count = ttff & ~D3DTTFF_PROJECTED;
-
-        stage.Projected      = (ttff & D3DTTFF_PROJECTED) ? 1      : 0;
-        stage.ProjectedCount = (ttff & D3DTTFF_PROJECTED) ? count  : 0;
-
-        stage.SampleDref = (m_textureSlotTracking.depth & (1 << idx)) != 0;
       }
-
-      auto& stage0 = key.Stages[0].Contents;
-
-      if (stage0.ResultIsTemp &&
-          stage0.ColorOp != D3DTOP_DISABLE &&
-          stage0.AlphaOp == D3DTOP_DISABLE) {
-        stage0.AlphaOp   = D3DTOP_SELECTARG1;
-        stage0.AlphaArg1 = D3DTA_DIFFUSE;
+      if (dirty) {
+        m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
       }
-
-      stage0.GlobalSpecularEnable = m_state.renderStates[D3DRS_SPECULARENABLE];
-
-      // The last stage *always* writes to current.
-      if (idx >= 1)
-        key.Stages[idx - 1].Contents.ResultIsTemp = false;
+    } else if (m_flags.test(D3D9DeviceFlag::DirtyFFPixelShader)) {
+      m_flags.clr(D3D9DeviceFlag::DirtyFFPixelShader);
 
       EmitCs([
         this,
@@ -8496,8 +8601,7 @@ namespace dxvk {
       });
     }
 
-    // Constants
-
+    // Constants...
     if (m_flags.test(D3D9DeviceFlag::DirtyFFPixelData)) {
       m_flags.clr(D3D9DeviceFlag::DirtyFFPixelData);
 
@@ -8506,6 +8610,9 @@ namespace dxvk {
 
       D3D9FixedFunctionPS* data = reinterpret_cast<D3D9FixedFunctionPS*>(mapPtr);
       DecodeD3DCOLOR((D3DCOLOR)rs[D3DRS_TEXTUREFACTOR], data->textureFactor.data);
+      if (useUbershader) {
+        data->Key = key;
+      }
     }
   }
 
