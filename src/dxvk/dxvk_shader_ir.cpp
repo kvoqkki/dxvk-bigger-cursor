@@ -1405,6 +1405,14 @@ namespace dxvk {
         if (m_metadata.stage == VK_SHADER_STAGE_GEOMETRY_BIT && linkage->inputTopology != m_metadata.inputTopology)
           ioPass.changeGsInputPrimitiveType(convertPrimitiveType(linkage->inputTopology));
 
+        if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsDualSrcBlend) {
+          dxbc_spv::ir::IoMap io = { };
+          io.add(dxbc_spv::ir::IoLocation(dxbc_spv::ir::IoEntryType::ePerVertex, 0u, 0xfu));
+          io.add(dxbc_spv::ir::IoLocation(dxbc_spv::ir::IoEntryType::ePerVertex, 1u, 0xfu));
+
+          ioPass.resolveUnusedOutputs(io);
+        }
+
         if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
           std::array<dxbc_spv::ir::IoOutputSwizzle, 8u> swizzles = { };
           uint32_t outputMask = m_metadata.outputs.computeMask();
@@ -1476,6 +1484,9 @@ namespace dxvk {
     options.supportsZeroInfNanPreserveF16 = m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsSzInfNanPreserve16);
     options.supportsZeroInfNanPreserveF32 = m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsSzInfNanPreserve32);
     options.supportsZeroInfNanPreserveF64 = m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsSzInfNanPreserve64);
+
+    options.maxCbvSize = m_info.options.maxUniformBufferSize;
+    options.maxCbvCount = m_info.options.maxUniformBufferCount;
 
     // Build final SPIR-V binary
     DxvkShaderResourceMapping mapping(m_metadata.stage, bindings);
@@ -1563,8 +1574,7 @@ namespace dxvk {
       ioPass.demoteMultisampledSrv();
     }
 
-    dxbc_spv::dxbc::CompileOptions options;
-    options.arithmeticOptions.fuseMad = true;
+    dxbc_spv::ir::CompileOptions options;
     options.arithmeticOptions.lowerDot = true;
     options.arithmeticOptions.lowerSinCos = m_info.options.flags.test(DxvkShaderCompileFlag::LowerSinCos);
     options.arithmeticOptions.lowerMsad = true;
@@ -1600,7 +1610,7 @@ namespace dxvk {
     options.derivativeOptions.hoistNontrivialImplicitLodOps = false;
     options.derivativeOptions.hoistDescriptorLoads = true;
 
-    dxbc_spv::dxbc::legalizeIr(builder, options);
+    dxbc_spv::ir::legalizeIr(builder, options);
 
     // Generate shader metadata based on the final code
     DxvkIrLowerBindingModelPass lowerBindingModelPass(builder, *m_baseIr, m_info);

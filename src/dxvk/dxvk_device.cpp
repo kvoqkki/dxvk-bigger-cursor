@@ -278,9 +278,12 @@ namespace dxvk {
     if (canUseDescriptorBuffer())
       pipelineFlags.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT;
 
-    VkComputePipelineCreateInfo pipelineInfo = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, &pipelineFlags };
+    VkComputePipelineCreateInfo pipelineInfo = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
     pipelineInfo.layout = layout->getPipelineLayout();
     pipelineInfo.basePipelineIndex = -1;
+
+    if (pipelineFlags.flags)
+      pipelineFlags.pNext = std::exchange(pipelineInfo.pNext, &pipelineFlags);
 
     VkPipelineShaderStageCreateInfo& stageInfo = pipelineInfo.stage;
     stageInfo = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, &moduleInfo };
@@ -423,12 +426,12 @@ namespace dxvk {
     if (state.depthFormat && (depthFormatInfo->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT))
       renderingInfo.stencilAttachmentFormat = state.depthFormat;
 
-    VkPipelineCreateFlags2CreateInfo pipelineFlags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO, &renderingInfo };
+    VkPipelineCreateFlags2CreateInfo pipelineFlags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };
 
     if (canUseDescriptorBuffer())
       pipelineFlags.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT;
 
-    VkGraphicsPipelineCreateInfo pipelineInfo = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &pipelineFlags };
+    VkGraphicsPipelineCreateInfo pipelineInfo = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &renderingInfo };
     pipelineInfo.stageCount = stageInfos.size();
     pipelineInfo.pStages = stageInfos.data();
     pipelineInfo.pVertexInputState = state.viState ? state.viState : &viState;
@@ -441,6 +444,9 @@ namespace dxvk {
     pipelineInfo.pDynamicState = &dyState;
     pipelineInfo.layout = layout->getPipelineLayout();
     pipelineInfo.basePipelineIndex = -1;
+
+    if (pipelineFlags.flags)
+      pipelineFlags.pNext = std::exchange(pipelineInfo.pNext, &pipelineFlags);
 
     VkPipeline pipeline = VK_NULL_HANDLE;
 
@@ -742,6 +748,9 @@ namespace dxvk {
 
     // Forward UBO device limit as-is
     m_shaderOptions.maxUniformBufferSize = m_properties.core.properties.limits.maxUniformBufferRange;
+    m_shaderOptions.maxUniformBufferCount = m_properties.core.properties.limits.maxPerStageDescriptorUniformBuffers < MaxNumUniformBufferSlots
+      ? int32_t(m_properties.core.properties.limits.maxPerStageDescriptorUniformBuffers)
+      : -1;
 
     // ANV up to mesa 25.0.2 breaks when we *don't* explicitly write point size
     if (m_adapter->matchesDriver(VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA, Version(), Version(25, 0, 3)))
