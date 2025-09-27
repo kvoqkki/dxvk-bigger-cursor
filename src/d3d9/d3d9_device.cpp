@@ -3214,7 +3214,7 @@ namespace dxvk {
       return D3DERR_INVALIDCALL;
 
     if (unlikely(!PrimitiveCount))
-      return S_OK;
+      return D3D_OK;
 
     bool dynamicSysmemVBOs;
     uint32_t firstIndex     = 0;
@@ -3266,8 +3266,8 @@ namespace dxvk {
     if (unlikely(m_state.vertexDecl == nullptr))
       return D3DERR_INVALIDCALL;
 
-    if (unlikely(!PrimitiveCount))
-      return S_OK;
+    if (unlikely(!PrimitiveCount || !NumVertices))
+      return D3D_OK;
 
     bool dynamicSysmemVBOs;
     bool dynamicSysmemIBO;
@@ -3315,11 +3315,14 @@ namespace dxvk {
           UINT             VertexStreamZeroStride) {
     D3D9DeviceLock lock = LockDevice();
 
+    if (unlikely(!VertexStreamZeroStride))
+      return D3DERR_INVALIDCALL;
+
     if (unlikely(m_state.vertexDecl == nullptr))
       return D3DERR_INVALIDCALL;
 
     if (unlikely(!PrimitiveCount))
-      return S_OK;
+      return D3D_OK;
 
     PrepareDraw(PrimitiveType, false, false);
 
@@ -3368,11 +3371,14 @@ namespace dxvk {
           UINT             VertexStreamZeroStride) {
     D3D9DeviceLock lock = LockDevice();
 
+    if (unlikely(!VertexStreamZeroStride))
+      return D3DERR_INVALIDCALL;
+
     if (unlikely(m_state.vertexDecl == nullptr))
       return D3DERR_INVALIDCALL;
 
-    if (unlikely(!PrimitiveCount))
-      return S_OK;
+    if (unlikely(!PrimitiveCount || !NumVertices))
+      return D3D_OK;
 
     PrepareDraw(PrimitiveType, false, false);
 
@@ -3456,7 +3462,7 @@ namespace dxvk {
       return D3D_OK;
     }
 
-    if (!VertexCount)
+    if (unlikely(!VertexCount))
       return D3D_OK;
 
     D3D9CommonBuffer* dst  = static_cast<D3D9VertexBuffer*>(pDestBuffer)->GetCommonBuffer();
@@ -3647,8 +3653,8 @@ namespace dxvk {
 
     InitReturnPtr(ppDecl);
 
-    if (ppDecl == nullptr)
-      return D3D_OK;
+    if (unlikely(ppDecl == nullptr))
+      return D3DERR_INVALIDCALL;
 
     if (m_state.vertexDecl == nullptr)
       return D3D_OK;
@@ -3683,7 +3689,7 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetFVF(DWORD* pFVF) {
     D3D9DeviceLock lock = LockDevice();
 
-    if (pFVF == nullptr)
+    if (unlikely(pFVF == nullptr))
       return D3DERR_INVALIDCALL;
 
     *pFVF = m_state.vertexDecl != nullptr
@@ -8565,7 +8571,7 @@ namespace dxvk {
 
       uint32_t lastActiveTextureStage = std::max(activeTextureStageCount, 1u) - 1u; // Subtract 1 to make it fit 3 bits
       bool dirty = m_specInfo.set<D3D9SpecConstantId::SpecFFLastActiveTextureStage>(lastActiveTextureStage);
-      dirty |= m_specInfo.set<D3D9SpecConstantId::SpecFFGlobalSpecularEnabled>(key.Stages[0].Contents.GlobalSpecularEnable);
+      dirty |= m_specInfo.set<D3D9SpecConstantId::SpecFFGlobalSpecularEnabled>(m_state.renderStates[D3DRS_SPECULARENABLE]);
       constexpr uint32_t perTextureStageSpecConsts = static_cast<uint32_t>(D3D9SpecConstantId::SpecFFTextureStage1ColorOp) - static_cast<uint32_t>(D3D9SpecConstantId::SpecFFTextureStage0ColorOp);
       for (uint32_t i = 0; i < 4; i++) {
         if (i <= activeTextureStageCount) {
