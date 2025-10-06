@@ -107,6 +107,12 @@ namespace dxvk {
       { "dxgi.hideNvidiaGpu",              "False" },
       { "dxgi.hideIntelGpu",                "True" },
     }} },
+    /* Far Cry 5 and New Dawn: Unsynchronized     *
+     * write-after-read in some compute shaders   *
+     * cause invisible terrain on some GPUs.      */
+    { R"(\\FarCry(5|NewDawn)\.exe$)", {{
+      { "d3d11.forceComputeLdsBarriers",    "True" },
+    }} },
     /* Frostpunk: Renders one frame with D3D9     *
      * after creating the DXGI swap chain         */
     { R"(\\Frostpunk\.exe$)", {{
@@ -227,7 +233,7 @@ namespace dxvk {
     /* F1 games - do not synchronize TGSM access  *
      * in a compute shader, causing artifacts     */
     { R"(\\F1_20(1[89]|[2-9][0-9])\.exe$)", {{
-      { "d3d11.forceVolatileTgsmAccess",    "True" },
+      { "d3d11.forceComputeLdsBarriers",    "True" },
     }} },
     /* Darksiders Warmastered - apparently reads  *
      * from write-only mapped buffers             */
@@ -253,12 +259,6 @@ namespace dxvk {
     /* Armored Warfare             */
     { R"(\\armoredwarfare\.exe$)", {{
       { "d3d11.cachedDynamicResources",        "c" },
-    }} },
-    /* Shadow of the Tomb Raider - invariant      *
-     * position breaks character rendering on NV  */
-    { R"(\\SOTTR\.exe$)", {{
-      { "d3d11.invariantPosition",         "False" },
-      { "d3d11.floatControls",             "False" },
     }} },
     /* Nioh 2                                     */
     { R"(\\nioh2\.exe$)", {{
@@ -347,11 +347,6 @@ namespace dxvk {
      * Games speed up above 60 fps                */
     { R"(\\MSFC\.exe$)", {{
       { "dxgi.maxFrameRate",                  "60" },
-    }} },
-    /* Battlefield: Bad Company 2                 *
-     * Gets rid of black flickering               */
-    { R"(\\BFBC2Game\.exe$)", {{
-      { "d3d11.floatControls",             "False" },
     }} },
     /* Sonic Frontiers - flickering shadows and   *
      * vegetation when GPU-bound                  */
@@ -1116,6 +1111,11 @@ namespace dxvk {
     { R"(\\Heroes of Annihilated Empires.*\\engine\.exe$)", {{
       { "d3d9.maxFrameRate",                  "60" },
     }} },
+    /* RaceRoom Racing Experience                 *
+     * Game depends on NvAPI_D3D9_StretchRectEx   */
+    { R"(\\RRRE(64)?\.exe$)", {{
+      { "d3d9.hideNvidiaGpu",               "True" },
+    }} },
 
     /**********************************************/
     /* D3D8 GAMES                                 */
@@ -1322,6 +1322,16 @@ namespace dxvk {
      * legacy DISCARD behavior                    */
     { R"(\\TopSpin\.exe$)", {{
       { "d3d8.forceLegacyDiscard",          "True" },
+    }} },
+    /* Lego Racers 2 - Hits an incredible amount  *
+     * of queue syncs with direct buffer mapping  */
+    { R"(\\LEGO Racers 2\.exe$)", {{
+      { "d3d9.allowDirectBufferMapping",   "False" },
+    }} },
+    /* Smash Up Derby - Poor performance on Intel *
+     * due to queue syncs on certain race tracks  */
+    { R"(\\Smash up Derby\\cars\.exe$)", {{
+      { "d3d9.allowDirectBufferMapping",   "False" },
     }} },
   };
 
