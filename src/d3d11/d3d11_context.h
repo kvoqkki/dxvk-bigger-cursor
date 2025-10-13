@@ -801,6 +801,8 @@ namespace dxvk {
 
     DxvkLocalAllocationCache    m_allocationCache;
 
+    D3D11ShaderStageState<Rc<DxvkBuffer>> m_instanceData;
+
     DxvkCsChunkRef AllocCsChunk();
     
     DxvkBufferSlice AllocStagingBuffer(
@@ -1164,6 +1166,20 @@ namespace dxvk {
             UINT                              NumViews,
             ID3D11RenderTargetView* const*    ppRenderTargetViews,
             ID3D11DepthStencilView*           pDepthStencilView);
+
+    template<D3D11ShaderType ShaderStage>
+    void SetClassInstances(
+      const D3D11CommonShader*                pShader,
+            ID3D11ClassInstance* const*       ppClassInstances,
+            UINT                              NumClassInstances);
+
+    template<D3D11ShaderType ShaderStage>
+    void GetClassInstances(
+            ID3D11ClassInstance**             ppClassInstances,
+            UINT*                             pNumClassInstances);
+
+    Rc<DxvkBuffer> AllocInstanceDataBuffer(
+            D3D11ShaderType                   ShaderStage);
 
     static DxvkInputAssemblyState InitDefaultPrimitiveTopology();
 
