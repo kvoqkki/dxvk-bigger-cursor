@@ -169,35 +169,35 @@ namespace dxvk {
 
     // Initially set all the dirty flags so we
     // always end up giving the backend *something* to work with.
-    m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
-    m_flags.set(D3D9DeviceFlag::DirtyClipPlanes);
-    m_flags.set(D3D9DeviceFlag::DirtyDepthStencilState);
-    m_flags.set(D3D9DeviceFlag::DirtyBlendState);
-    m_flags.set(D3D9DeviceFlag::DirtyRasterizerState);
-    m_flags.set(D3D9DeviceFlag::DirtyDepthBias);
-    m_flags.set(D3D9DeviceFlag::DirtyAlphaTestState);
-    m_flags.set(D3D9DeviceFlag::DirtyInputLayout);
-    m_flags.set(D3D9DeviceFlag::DirtyViewportScissor);
-    m_flags.set(D3D9DeviceFlag::DirtyMultiSampleState);
+    m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
+    m_dirty.set(D3D9DeviceDirtyFlag::ClipPlanes);
+    m_dirty.set(D3D9DeviceDirtyFlag::DepthStencilState);
+    m_dirty.set(D3D9DeviceDirtyFlag::BlendState);
+    m_dirty.set(D3D9DeviceDirtyFlag::RasterizerState);
+    m_dirty.set(D3D9DeviceDirtyFlag::DepthBias);
+    m_dirty.set(D3D9DeviceDirtyFlag::AlphaTestState);
+    m_dirty.set(D3D9DeviceDirtyFlag::InputLayout);
+    m_dirty.set(D3D9DeviceDirtyFlag::ViewportScissor);
+    m_dirty.set(D3D9DeviceDirtyFlag::MultiSampleState);
 
-    m_flags.set(D3D9DeviceFlag::DirtyFogState);
-    m_flags.set(D3D9DeviceFlag::DirtyFogColor);
-    m_flags.set(D3D9DeviceFlag::DirtyFogDensity);
-    m_flags.set(D3D9DeviceFlag::DirtyFogScale);
-    m_flags.set(D3D9DeviceFlag::DirtyFogEnd);
+    m_dirty.set(D3D9DeviceDirtyFlag::FogState);
+    m_dirty.set(D3D9DeviceDirtyFlag::FogColor);
+    m_dirty.set(D3D9DeviceDirtyFlag::FogDensity);
+    m_dirty.set(D3D9DeviceDirtyFlag::FogScale);
+    m_dirty.set(D3D9DeviceDirtyFlag::FogEnd);
 
-    m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
-    m_flags.set(D3D9DeviceFlag::DirtyFFVertexBlend);
-    m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
-    m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
-    m_flags.set(D3D9DeviceFlag::DirtyFFViewport);
-    m_flags.set(D3D9DeviceFlag::DirtyFFPixelData);
-    m_flags.set(D3D9DeviceFlag::DirtySharedPixelShaderData);
-    m_flags.set(D3D9DeviceFlag::DirtyDepthBounds);
-    m_flags.set(D3D9DeviceFlag::DirtyPointScale);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexBlend);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFPixelShader);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFViewport);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFPixelData);
+    m_dirty.set(D3D9DeviceDirtyFlag::SharedPixelShaderData);
+    m_dirty.set(D3D9DeviceDirtyFlag::DepthBounds);
+    m_dirty.set(D3D9DeviceDirtyFlag::PointScale);
 
-    m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
-    
+    m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
+
     m_specInfo.set<SpecDrefScaling, uint32_t>(m_d3d9Options.drefScaling);
 
     BindFFUbershader<DxsoProgramType::VertexShader>();
@@ -720,7 +720,7 @@ namespace dxvk {
       // while D3D9Ex doesn't.
       // Observed in Empires: Dawn of the Modern World (D3D8)
       // and the OSU compatibility mode (D3D9Ex).
-      m_flags.clr(D3D9DeviceFlag::InScene);
+      m_inScene = false;
     } else {
       // Extended devices will not reset the MinZ/MaxZ viewport values
       const float MinZ = m_state.viewport.MinZ;
@@ -1552,7 +1552,7 @@ namespace dxvk {
       if (unlikely(srcCopyExtent.width != srcExtent.width || srcCopyExtent.height != srcExtent.height))
         return D3DERR_INVALIDCALL;
 
-      if (unlikely(m_flags.test(D3D9DeviceFlag::InScene)))
+      if (unlikely(m_inScene))
         return D3DERR_INVALIDCALL;
     }
 
@@ -1865,6 +1865,8 @@ namespace dxvk {
       return D3DERR_INVALIDCALL;
 
     if (RenderTargetIndex == 0) {
+      // Setting Render target 0 changes viewport & scissor
+      // even if it gets changed to the one that's already bound.
       D3DVIEWPORT9 viewport;
       viewport.X       = 0;
       viewport.Y       = 0;
@@ -1889,14 +1891,14 @@ namespace dxvk {
       }
 
       if (m_state.viewport != viewport) {
-        m_flags.set(D3D9DeviceFlag::DirtyFFViewport);
-        m_flags.set(D3D9DeviceFlag::DirtyPointScale);
-        m_flags.set(D3D9DeviceFlag::DirtyViewportScissor);
+        m_dirty.set(D3D9DeviceDirtyFlag::FFViewport);
+        m_dirty.set(D3D9DeviceDirtyFlag::PointScale);
+        m_dirty.set(D3D9DeviceDirtyFlag::ViewportScissor);
         m_state.viewport = viewport;
       }
 
       if (m_state.scissorRect != scissorRect) {
-        m_flags.set(D3D9DeviceFlag::DirtyViewportScissor);
+        m_dirty.set(D3D9DeviceDirtyFlag::ViewportScissor);
         m_state.scissorRect = scissorRect;
       }
     }
@@ -1904,33 +1906,40 @@ namespace dxvk {
     if (m_state.renderTargets[RenderTargetIndex] == rt)
       return D3D_OK;
 
+    m_state.renderTargets[RenderTargetIndex] = rt;
+
     // Do a strong flush if the first render target is changed.
     ConsiderFlush(RenderTargetIndex == 0
       ? GpuFlushType::ImplicitStrongHint
       : GpuFlushType::ImplicitWeakHint);
-    m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
 
-    m_state.renderTargets[RenderTargetIndex] = rt;
+    m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
-    // Update feedback loop tracking bitmasks
-    UpdateActiveRTs(RenderTargetIndex);
+    // Update tracking bitmasks
+    uint32_t oldAlphaSwizzleRTs = m_rtSlotTracking.hasAlphaSwizzle;
+    const uint32_t bit = 1u << RenderTargetIndex;
+    m_rtSlotTracking.canBeSampled    &= ~bit;
+    m_rtSlotTracking.hasAlphaSwizzle &= ~bit;
 
-    // Update render target alpha swizzle bitmask if we need to fix up the alpha channel
-    // for XRGB formats
-    uint32_t originalAlphaSwizzleRTs = m_rtSlotTracking.hasAlphaSwizzle;
+    if (texInfo != nullptr) {
+      // Update render target sampling usage bitmask for hazard tracking
+      m_rtSlotTracking.canBeSampled |= uint8_t(HasRenderTargetBound(RenderTargetIndex) &&
+        rt->GetBaseTexture() != nullptr) << RenderTargetIndex;
 
-    m_rtSlotTracking.hasAlphaSwizzle &= ~(1 << RenderTargetIndex);
-
-    if (rt != nullptr) {
-      if (texInfo->GetMapping().Swizzle.a == VK_COMPONENT_SWIZZLE_ONE)
-        m_rtSlotTracking.hasAlphaSwizzle |= 1 << RenderTargetIndex;
+      // Update render target alpha swizzle bitmask if we need to fix up the alpha channel
+      // for XRGB formats
+      m_rtSlotTracking.hasAlphaSwizzle |= uint8_t(texInfo->GetMapping().Swizzle.a == VK_COMPONENT_SWIZZLE_ONE) << RenderTargetIndex;
 
       if (texInfo->IsAutomaticMip())
         texInfo->SetNeedsMipGen(true);
     }
 
-    if (originalAlphaSwizzleRTs != m_rtSlotTracking.hasAlphaSwizzle)
-      m_flags.set(D3D9DeviceFlag::DirtyBlendState);
+    // Update hazards now that the RT has changed
+    UpdateActiveHazardsRT(std::numeric_limits<uint32_t>::max());
+
+    // The blend factors need to get adjusted to the swizzle.
+    if (oldAlphaSwizzleRTs != m_rtSlotTracking.hasAlphaSwizzle)
+      m_dirty.set(D3D9DeviceDirtyFlag::BlendState);
 
     if (RenderTargetIndex == 0) {
       // Changing RT0 can disable ATOC and
@@ -1939,24 +1948,20 @@ namespace dxvk {
       UpdateAlphaToCoverangeAndAlphaTest();
 
       if (likely(texInfo != nullptr)) {
-        if (m_alphaTestEnabled) {
-          // We need to recalculate the precision.
-          m_flags.set(D3D9DeviceFlag::DirtyAlphaTestState);
-        }
+        // We need to recalculate the alpha test precision for the potentially changed RT format.
+        // Updating the precision is cheap, so there's no need to compare the previous format to the new one.
+        if (m_alphaTestEnabled)
+          m_dirty.set(D3D9DeviceDirtyFlag::AlphaTestState);
 
-        bool validSampleMask = texInfo->Desc()->MultiSample > D3DMULTISAMPLE_NONMASKABLE;
-
-        if (validSampleMask != m_flags.test(D3D9DeviceFlag::ValidSampleMask)) {
-          m_flags.clr(D3D9DeviceFlag::ValidSampleMask);
-          if (validSampleMask)
-            m_flags.set(D3D9DeviceFlag::ValidSampleMask);
-
-          m_flags.set(D3D9DeviceFlag::DirtyMultiSampleState);
-        }
+        bool oldValidSampleMask = m_validSampleMask;
+        m_validSampleMask = texInfo->Desc()->MultiSample > D3DMULTISAMPLE_NONMASKABLE;
+        // We need to update the multisample state to account for the changed sample mask.
+        if (m_validSampleMask != oldValidSampleMask)
+          m_dirty.set(D3D9DeviceDirtyFlag::MultiSampleState);
       } else {
-        m_flags.clr(D3D9DeviceFlag::ValidSampleMask);
-        m_flags.set(D3D9DeviceFlag::DirtyMultiSampleState);
-        m_flags.set(D3D9DeviceFlag::DirtyAlphaTestState);
+        m_validSampleMask = false;
+        m_dirty.set(D3D9DeviceDirtyFlag::MultiSampleState);
+        m_dirty.set(D3D9DeviceDirtyFlag::AlphaTestState);
       }
     }
 
@@ -1995,7 +2000,7 @@ namespace dxvk {
       return D3D_OK;
 
     ConsiderFlush(GpuFlushType::ImplicitWeakHint);
-    m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+    m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
     // Update depth bias if necessary
     if (ds != nullptr && m_depthBiasRepresentation.depthBiasRepresentation != VK_DEPTH_BIAS_REPRESENTATION_FLOAT_EXT) {
@@ -2005,7 +2010,7 @@ namespace dxvk {
       const float rValue = GetDepthBufferRValue(ds->GetCommonTexture()->GetFormatMapping().FormatColor, vendorId, exact, forceUnorm);
       if (m_depthBiasScale != rValue) {
         m_depthBiasScale = rValue;
-        m_flags.set(D3D9DeviceFlag::DirtyDepthBias);
+        m_dirty.set(D3D9DeviceDirtyFlag::DepthBias);
       }
     }
 
@@ -2039,10 +2044,10 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::BeginScene() {
     D3D9DeviceLock lock = LockDevice();
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::InScene)))
+    if (unlikely(m_inScene))
       return D3DERR_INVALIDCALL;
 
-    m_flags.set(D3D9DeviceFlag::InScene);
+    m_inScene = true;
 
     return D3D_OK;
   }
@@ -2051,12 +2056,12 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::EndScene() {
     D3D9DeviceLock lock = LockDevice();
 
-    if (unlikely(!m_flags.test(D3D9DeviceFlag::InScene)))
+    if (unlikely(!m_inScene))
       return D3DERR_INVALIDCALL;
 
     ConsiderFlush(GpuFlushType::ImplicitStrongHint);
 
-    m_flags.clr(D3D9DeviceFlag::InScene);
+    m_inScene = false;
 
     // D3D9 resets the internally bound vertex buffers and index buffer in EndScene if they were unbound in the meantime.
     // We have to ignore unbinding those buffers because of Operation Flashpoint Red River,
@@ -2283,10 +2288,10 @@ namespace dxvk {
 
     m_state.transforms[idx] = m_state.transforms[idx] * ConvertMatrix(pMatrix);
 
-    m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
 
     if (idx == GetTransformIndex(D3DTS_VIEW) || idx >= GetTransformIndex(D3DTS_WORLD))
-      m_flags.set(D3D9DeviceFlag::DirtyFFVertexBlend);
+      m_dirty.set(D3D9DeviceDirtyFlag::FFVertexBlend);
 
     return D3D_OK;
   }
@@ -2313,9 +2318,9 @@ namespace dxvk {
     m_state.viewport.MinZ = pViewport->MinZ;
     m_state.viewport.MaxZ = pViewport->MinZ < pViewport->MaxZ ? pViewport->MaxZ : pViewport->MinZ + 0.001f;
 
-    m_flags.set(D3D9DeviceFlag::DirtyViewportScissor);
-    m_flags.set(D3D9DeviceFlag::DirtyFFViewport);
-    m_flags.set(D3D9DeviceFlag::DirtyPointScale);
+    m_dirty.set(D3D9DeviceDirtyFlag::ViewportScissor);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFViewport);
+    m_dirty.set(D3D9DeviceDirtyFlag::PointScale);
 
     return D3D_OK;
   }
@@ -2343,7 +2348,7 @@ namespace dxvk {
       return m_recorder->SetMaterial(pMaterial);
 
     m_state.material = *pMaterial;
-    m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
 
     return D3D_OK;
   }
@@ -2378,7 +2383,7 @@ namespace dxvk {
     m_state.lights[Index] = *pLight;
 
     if (m_state.IsLightEnabled(Index))
-      m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
+      m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
 
     return D3D_OK;
   }
@@ -2425,8 +2430,8 @@ namespace dxvk {
     for (auto& idx : m_state.enabledLightIndices) {
       if (idx == searchIndex) {
         idx = setIndex;
-        m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
-        m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+        m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
+        m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
         break;
       }
     }
@@ -2474,7 +2479,7 @@ namespace dxvk {
     dirty &= enabled;
 
     if (dirty)
-      m_flags.set(D3D9DeviceFlag::DirtyClipPlanes);
+      m_dirty.set(D3D9DeviceDirtyFlag::ClipPlanes);
 
     return D3D_OK;
   }
@@ -2527,28 +2532,28 @@ namespace dxvk {
         case D3DRS_DESTBLENDALPHA:
         case D3DRS_SRCBLEND:
         case D3DRS_SRCBLENDALPHA:
-          m_flags.set(D3D9DeviceFlag::DirtyBlendState);
+          m_dirty.set(D3D9DeviceDirtyFlag::BlendState);
           break;
 
         case D3DRS_COLORWRITEENABLE:
           if (likely(!Value != !oldValue))
             UpdateAnyColorWrites<0>();
-          m_flags.set(D3D9DeviceFlag::DirtyBlendState);
+          m_dirty.set(D3D9DeviceDirtyFlag::BlendState);
           break;
         case D3DRS_COLORWRITEENABLE1:
           if (likely(!Value != !oldValue))
             UpdateAnyColorWrites<1>();
-          m_flags.set(D3D9DeviceFlag::DirtyBlendState);
+          m_dirty.set(D3D9DeviceDirtyFlag::BlendState);
           break;
         case D3DRS_COLORWRITEENABLE2:
           if (likely(!Value != !oldValue))
             UpdateAnyColorWrites<2>();
-          m_flags.set(D3D9DeviceFlag::DirtyBlendState);
+          m_dirty.set(D3D9DeviceDirtyFlag::BlendState);
           break;
         case D3DRS_COLORWRITEENABLE3:
           if (likely(!Value != !oldValue))
             UpdateAnyColorWrites<3>();
-          m_flags.set(D3D9DeviceFlag::DirtyBlendState);
+          m_dirty.set(D3D9DeviceDirtyFlag::BlendState);
           break;
 
         case D3DRS_ALPHATESTENABLE: {
@@ -2557,7 +2562,7 @@ namespace dxvk {
         }
 
         case D3DRS_ALPHAFUNC:
-          m_flags.set(D3D9DeviceFlag::DirtyAlphaTestState);
+          m_dirty.set(D3D9DeviceDirtyFlag::AlphaTestState);
           break;
 
         case D3DRS_BLENDFACTOR:
@@ -2565,8 +2570,8 @@ namespace dxvk {
           break;
 
         case D3DRS_MULTISAMPLEMASK:
-          if (m_flags.test(D3D9DeviceFlag::ValidSampleMask))
-            m_flags.set(D3D9DeviceFlag::DirtyMultiSampleState);
+          if (m_validSampleMask)
+            m_dirty.set(D3D9DeviceDirtyFlag::MultiSampleState);
           break;
 
         case D3DRS_ZWRITEENABLE:
@@ -2577,13 +2582,13 @@ namespace dxvk {
               UpdateActiveHazardsDS(std::numeric_limits<uint32_t>::max());
               }
 
-            m_flags.set(D3D9DeviceFlag::DirtyDepthStencilState);
+            m_dirty.set(D3D9DeviceDirtyFlag::DepthStencilState);
           }
           break;
 
         case D3DRS_STENCILENABLE:
           if (likely(!Value != !oldValue)) {
-            m_flags.set(D3D9DeviceFlag::DirtyDepthStencilState);
+            m_dirty.set(D3D9DeviceDirtyFlag::DepthStencilState);
           }
           break;
 
@@ -2594,7 +2599,7 @@ namespace dxvk {
               UpdateActiveHazardsDS(std::numeric_limits<uint32_t>::max());
             }
 
-            m_flags.set(D3D9DeviceFlag::DirtyDepthStencilState);
+            m_dirty.set(D3D9DeviceDirtyFlag::DepthStencilState);
           }
           break;
 
@@ -2610,7 +2615,7 @@ namespace dxvk {
         case D3DRS_CCW_STENCILFUNC:
         case D3DRS_STENCILMASK:
         case D3DRS_STENCILWRITEMASK:
-          m_flags.set(D3D9DeviceFlag::DirtyDepthStencilState);
+          m_dirty.set(D3D9DeviceDirtyFlag::DepthStencilState);
           break;
 
         case D3DRS_STENCILREF:
@@ -2618,28 +2623,28 @@ namespace dxvk {
           break;
 
         case D3DRS_SCISSORTESTENABLE:
-          m_flags.set(D3D9DeviceFlag::DirtyViewportScissor);
+          m_dirty.set(D3D9DeviceDirtyFlag::ViewportScissor);
           break;
 
         case D3DRS_SRGBWRITEENABLE:
-          m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+          m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
           break;
 
         case D3DRS_DEPTHBIAS:
         case D3DRS_SLOPESCALEDEPTHBIAS:
-          m_flags.set(D3D9DeviceFlag::DirtyDepthBias);
+          m_dirty.set(D3D9DeviceDirtyFlag::DepthBias);
           break;
 
         case D3DRS_CULLMODE:
         case D3DRS_FILLMODE:
-          m_flags.set(D3D9DeviceFlag::DirtyRasterizerState);
+          m_dirty.set(D3D9DeviceDirtyFlag::RasterizerState);
           break;
 
         case D3DRS_CLIPPLANEENABLE:
           if (!Value != !oldValue)
-            m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+            m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
 
-          m_flags.set(D3D9DeviceFlag::DirtyClipPlanes);
+          m_dirty.set(D3D9DeviceDirtyFlag::ClipPlanes);
           break;
 
         case D3DRS_ALPHAREF:
@@ -2647,7 +2652,7 @@ namespace dxvk {
           break;
 
         case D3DRS_TEXTUREFACTOR:
-          m_flags.set(D3D9DeviceFlag::DirtyFFPixelData);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFPixelData);
           break;
 
         case D3DRS_DIFFUSEMATERIALSOURCE:
@@ -2658,42 +2663,43 @@ namespace dxvk {
         case D3DRS_LIGHTING:
         case D3DRS_NORMALIZENORMALS:
         case D3DRS_LOCALVIEWER:
-          m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
           break;
 
         case D3DRS_AMBIENT:
-          m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
           break;
 
         case D3DRS_SPECULARENABLE:
-          m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFPixelShader);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
           break;
 
         case D3DRS_FOGENABLE:
         case D3DRS_FOGVERTEXMODE:
         case D3DRS_FOGTABLEMODE:
-          m_flags.set(D3D9DeviceFlag::DirtyFogState);
+          m_dirty.set(D3D9DeviceDirtyFlag::FogState);
           break;
 
         case D3DRS_RANGEFOGENABLE:
-          m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
           break;
 
         case D3DRS_FOGCOLOR:
-          m_flags.set(D3D9DeviceFlag::DirtyFogColor);
+          m_dirty.set(D3D9DeviceDirtyFlag::FogColor);
           break;
 
         case D3DRS_FOGSTART:
-          m_flags.set(D3D9DeviceFlag::DirtyFogScale);
+          m_dirty.set(D3D9DeviceDirtyFlag::FogScale);
           break;
 
         case D3DRS_FOGEND:
-          m_flags.set(D3D9DeviceFlag::DirtyFogScale);
-          m_flags.set(D3D9DeviceFlag::DirtyFogEnd);
+          m_dirty.set(D3D9DeviceDirtyFlag::FogScale);
+          m_dirty.set(D3D9DeviceDirtyFlag::FogEnd);
           break;
 
         case D3DRS_FOGDENSITY:
-          m_flags.set(D3D9DeviceFlag::DirtyFogDensity);
+          m_dirty.set(D3D9DeviceDirtyFlag::FogDensity);
           break;
 
         case D3DRS_POINTSIZE: {
@@ -2756,7 +2762,7 @@ namespace dxvk {
         case D3DRS_POINTSCALE_A:
         case D3DRS_POINTSCALE_B:
         case D3DRS_POINTSCALE_C:
-          m_flags.set(D3D9DeviceFlag::DirtyPointScale);
+          m_dirty.set(D3D9DeviceDirtyFlag::PointScale);
           break;
 
         case D3DRS_POINTSCALEENABLE:
@@ -2766,22 +2772,22 @@ namespace dxvk {
           break;
 
         case D3DRS_SHADEMODE:
-          m_flags.set(D3D9DeviceFlag::DirtyRasterizerState);
+          m_dirty.set(D3D9DeviceDirtyFlag::RasterizerState);
           break;
 
         case D3DRS_TWEENFACTOR:
-          m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
           break;
 
         case D3DRS_VERTEXBLEND:
-          m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
           break;
 
         case D3DRS_INDEXEDVERTEXBLENDENABLE:
           if (CanSWVP() && Value)
-            m_flags.set(D3D9DeviceFlag::DirtyFFVertexBlend);
+            m_dirty.set(D3D9DeviceDirtyFlag::FFVertexBlend);
 
-          m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
           break;
 
         case D3DRS_ADAPTIVETESS_Y: {
@@ -2835,10 +2841,10 @@ namespace dxvk {
           const bool nvdbEnabled = vendorId == nvidiaVendorId && IsNVDepthBoundsTestEnabled();
 
           if (nvdbEnabled || m_nvdbEnabled) {
-            m_flags.set(D3D9DeviceFlag::DirtyDepthBounds);
+            m_dirty.set(D3D9DeviceDirtyFlag::DepthBounds);
 
             if (likely(IsZTestEnabled()))
-              m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+              m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
 
             // NVDB state changes happen on D3DRS_ADAPTIVETESS_X,
             // whereas D3DRS_ADAPTIVETESS_Z and D3DRS_ADAPTIVETESS_W
@@ -3155,7 +3161,7 @@ namespace dxvk {
 
     m_state.scissorRect = *pRect;
 
-    m_flags.set(D3D9DeviceFlag::DirtyViewportScissor);
+    m_dirty.set(D3D9DeviceDirtyFlag::ViewportScissor);
 
     return D3D_OK;
   }
@@ -3565,7 +3571,7 @@ namespace dxvk {
       BindShader<DxsoProgramTypes::PixelShader>(
         GetCommonShader(m_state.pixelShader));
     } else {
-      m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
+      m_dirty.set(D3D9DeviceDirtyFlag::FFPixelShader);
       BindFFUbershader<DxsoProgramType::PixelShader>();
     }
 
@@ -3632,7 +3638,7 @@ namespace dxvk {
                     || decl->GetTexcoordMask() != m_state.vertexDecl->GetTexcoordMask();
 
     if (dirtyFFShader)
-      m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+      m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
 
     const bool wasUsingProgrammableVS = UseProgrammableVS();
 
@@ -3644,12 +3650,12 @@ namespace dxvk {
       if (usesProgrammableVS) {
         BindShader<DxsoProgramType::VertexShader>(GetCommonShader(m_state.vertexShader));
       } else {
-        m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+        m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
         BindFFUbershader<DxsoProgramType::VertexShader>();
       }
     }
 
-    m_flags.set(D3D9DeviceFlag::DirtyInputLayout);
+    m_dirty.set(D3D9DeviceDirtyFlag::InputLayout);
 
     return D3D_OK;
   }
@@ -3777,11 +3783,11 @@ namespace dxvk {
 
       UpdateTextureTypeMismatchesForShader(newShader, VSShaderMasks().samplerMask, FirstVSSamplerSlot);
     } else if (wasUsingProgrammableVS) {
-      m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+      m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
       BindFFUbershader<DxsoProgramType::VertexShader>();
     }
 
-    m_flags.set(D3D9DeviceFlag::DirtyInputLayout);
+    m_dirty.set(D3D9DeviceDirtyFlag::InputLayout);
 
     return D3D_OK;
   }
@@ -4010,7 +4016,7 @@ namespace dxvk {
     else
       m_vbSlotTracking.instanced &= ~(1u << StreamNumber);
 
-    m_flags.set(D3D9DeviceFlag::DirtyInputLayout);
+    m_dirty.set(D3D9DeviceDirtyFlag::InputLayout);
 
     return D3D_OK;
   }
@@ -4147,11 +4153,11 @@ namespace dxvk {
         dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ResultIsTemp + perTextureStageSpecConsts * i), 0u);
       }
       if (dirty) {
-        m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+        m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
       }
     }
     else {
-      m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
+      m_dirty.set(D3D9DeviceDirtyFlag::FFPixelShader);
       BindFFUbershader<DxsoProgramType::PixelShader>();
 
       // TODO: What fixed function textures are in use?
@@ -4828,7 +4834,7 @@ namespace dxvk {
       // we need to update the fixed function shader
       // because we generate a different shader based on whether each texture is bound.
       if (newTexture == nullptr || oldTexture == nullptr)
-        m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
+        m_dirty.set(D3D9DeviceDirtyFlag::FFPixelShader);
     }
 
     bool oldTextureIsCube = oldTexture != nullptr && oldTexture->IsCube();
@@ -4856,10 +4862,10 @@ namespace dxvk {
 
     m_state.transforms[idx] = ConvertMatrix(pMatrix);
 
-    m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
 
     if (idx == GetTransformIndex(D3DTS_VIEW) || idx >= GetTransformIndex(D3DTS_WORLD))
-      m_flags.set(D3D9DeviceFlag::DirtyFFVertexBlend);
+      m_dirty.set(D3D9DeviceDirtyFlag::FFVertexBlend);
 
     return D3D_OK;
   }
@@ -4893,11 +4899,11 @@ namespace dxvk {
         case DXVK_TSS_ALPHAARG1:
         case DXVK_TSS_ALPHAARG2:
         case DXVK_TSS_RESULTARG:
-          m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFPixelShader);
           break;
 
         case DXVK_TSS_TEXCOORDINDEX:
-          m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
           break;
 
         case DXVK_TSS_TEXTURETRANSFORMFLAGS:
@@ -4905,8 +4911,8 @@ namespace dxvk {
           if (Value & D3DTTFF_PROJECTED)
             m_textureSlotTracking.projected |= 1 << Stage;
 
-          m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
-          m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
+          m_dirty.set(D3D9DeviceDirtyFlag::FFPixelShader);
           break;
 
         case DXVK_TSS_BUMPENVMAT00:
@@ -4916,7 +4922,7 @@ namespace dxvk {
         case DXVK_TSS_BUMPENVLSCALE:
         case DXVK_TSS_BUMPENVLOFFSET:
         case DXVK_TSS_CONSTANT:
-          m_flags.set(D3D9DeviceFlag::DirtySharedPixelShaderData);
+          m_dirty.set(D3D9DeviceDirtyFlag::SharedPixelShaderData);
           break;
 
         default: break;
@@ -6003,7 +6009,7 @@ namespace dxvk {
         ](DxvkContext* ctx) mutable {
           ctx->bindVertexBuffer(cStream, std::move(cBufferSlice), cStride);
         });
-        m_flags.set(D3D9DeviceFlag::DirtyVertexBuffers);
+        m_dirty.set(D3D9DeviceDirtyFlag::VertexBuffers);
       }
 
       // Change the draw call parameters to reflect the changed vertex buffers
@@ -6019,7 +6025,7 @@ namespace dxvk {
         EmitCs([](DxvkContext* ctx) {
           ctx->bindIndexBuffer(DxvkBufferSlice(), VK_INDEX_TYPE_UINT32);
         });
-        m_flags.set(D3D9DeviceFlag::DirtyIndexBuffer);
+        m_dirty.set(D3D9DeviceDirtyFlag::IndexBuffer);
       } else {
         auto* ibo = GetCommonBuffer(m_state.indices);
         uint32_t indexStride = ibo->Desc()->Format == D3D9Format::INDEX16 ? 2 : 4;
@@ -6036,7 +6042,7 @@ namespace dxvk {
         ](DxvkContext* ctx) mutable {
           ctx->bindIndexBuffer(std::move(cBufferSlice), cIndexType);
         });
-        m_flags.set(D3D9DeviceFlag::DirtyIndexBuffer);
+        m_dirty.set(D3D9DeviceDirtyFlag::IndexBuffer);
       }
 
       // Change the draw call parameters to reflect the changed index buffer
@@ -6354,7 +6360,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::UpdateClipPlanes() {
-    m_flags.clr(D3D9DeviceFlag::DirtyClipPlanes);
+    m_dirty.clr(D3D9DeviceDirtyFlag::ClipPlanes);
 
     auto mapPtr = m_vsClipPlanes.AllocSlice();
     auto dst = reinterpret_cast<D3D9ClipPlane*>(mapPtr);
@@ -6374,7 +6380,7 @@ namespace dxvk {
       dst[i] = D3D9ClipPlane();
 
     if (m_specInfo.set<SpecClipPlaneCount>(clipPlaneCount))
-      m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+      m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
   }
 
 
@@ -6551,7 +6557,7 @@ namespace dxvk {
 
     // Writes to render target 0 have been enabled and the RT might not be bound due to the 1x1 hack.
     if (Index == 0 && m_state.depthStencil != nullptr)
-      m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+      m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
   }
 
 
@@ -6685,7 +6691,7 @@ namespace dxvk {
     // Only dirty the framebuffer if we need to make changes for a new hazard
     if (unlikely(m_textureSlotTracking.hazardRT != oldHazardMask
       || m_textureSlotTracking.unresolvableHazardRT != oldUnresolvableHazardMask)) {
-      m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+      m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
     }
   }
 
@@ -6733,7 +6739,7 @@ namespace dxvk {
     // Only dirty the framebuffer if we need to make changes for a new hazard
     if (unlikely(m_textureSlotTracking.hazardDS != oldHazardMask
       || m_textureSlotTracking.unresolvableHazardDS != oldUnresolvableHazardMask)) {
-      m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+      m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
     }
   }
 
@@ -6773,7 +6779,7 @@ namespace dxvk {
       auto tex = GetCommonTexture(m_state.textures[samplerIdx]);
       if (unlikely(!tex->MarkTransitionedToHazardLayout())) {
         TransitionImage(tex, m_hazardLayout);
-        m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+        m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
       }
     }
   }
@@ -6965,8 +6971,8 @@ namespace dxvk {
 
     uint32_t mode = scaleBit | spriteBit;
 
-    if (rs[D3DRS_POINTSCALEENABLE] && m_flags.test(D3D9DeviceFlag::DirtyPointScale)) {
-      m_flags.clr(D3D9DeviceFlag::DirtyPointScale);
+    if (rs[D3DRS_POINTSCALEENABLE] && m_dirty.test(D3D9DeviceDirtyFlag::PointScale)) {
+      m_dirty.clr(D3D9DeviceDirtyFlag::PointScale);
 
       UpdatePushConstant<D3D9RenderStateItem::PointScaleA>();
       UpdatePushConstant<D3D9RenderStateItem::PointScaleB>();
@@ -6986,25 +6992,25 @@ namespace dxvk {
     bool vertexFog  = rs[D3DRS_FOGVERTEXMODE] != D3DFOG_NONE && fogEnabled && !pixelFog;
 
     auto UpdateFogConstants = [&](D3DFOGMODE FogMode) {
-      if (m_flags.test(D3D9DeviceFlag::DirtyFogColor)) {
-        m_flags.clr(D3D9DeviceFlag::DirtyFogColor);
+      if (m_dirty.test(D3D9DeviceDirtyFlag::FogColor)) {
+        m_dirty.clr(D3D9DeviceDirtyFlag::FogColor);
         UpdatePushConstant<D3D9RenderStateItem::FogColor>();
       }
 
       if (FogMode == D3DFOG_LINEAR) {
-        if (m_flags.test(D3D9DeviceFlag::DirtyFogScale)) {
-          m_flags.clr(D3D9DeviceFlag::DirtyFogScale);
+        if (m_dirty.test(D3D9DeviceDirtyFlag::FogScale)) {
+          m_dirty.clr(D3D9DeviceDirtyFlag::FogScale);
           UpdatePushConstant<D3D9RenderStateItem::FogScale>();
         }
 
-        if (m_flags.test(D3D9DeviceFlag::DirtyFogEnd)) {
-          m_flags.clr(D3D9DeviceFlag::DirtyFogEnd);
+        if (m_dirty.test(D3D9DeviceDirtyFlag::FogEnd)) {
+          m_dirty.clr(D3D9DeviceDirtyFlag::FogEnd);
           UpdatePushConstant<D3D9RenderStateItem::FogEnd>();
         }
       }
       else if (FogMode == D3DFOG_EXP || FogMode == D3DFOG_EXP2) {
-        if (m_flags.test(D3D9DeviceFlag::DirtyFogDensity)) {
-          m_flags.clr(D3D9DeviceFlag::DirtyFogDensity);
+        if (m_dirty.test(D3D9DeviceDirtyFlag::FogDensity)) {
+          m_dirty.clr(D3D9DeviceDirtyFlag::FogDensity);
           UpdatePushConstant<D3D9RenderStateItem::FogDensity>();
         }
       }
@@ -7015,8 +7021,8 @@ namespace dxvk {
 
       UpdateFogConstants(mode);
 
-      if (m_flags.test(D3D9DeviceFlag::DirtyFogState)) {
-        m_flags.clr(D3D9DeviceFlag::DirtyFogState);
+      if (m_dirty.test(D3D9DeviceDirtyFlag::FogState)) {
+        m_dirty.clr(D3D9DeviceDirtyFlag::FogState);
 
         UpdateFogModeSpec(true, mode, D3DFOG_NONE);
       }
@@ -7026,8 +7032,8 @@ namespace dxvk {
 
       UpdateFogConstants(mode);
 
-      if (m_flags.test(D3D9DeviceFlag::DirtyFogState)) {
-        m_flags.clr(D3D9DeviceFlag::DirtyFogState);
+      if (m_dirty.test(D3D9DeviceDirtyFlag::FogState)) {
+        m_dirty.clr(D3D9DeviceDirtyFlag::FogState);
 
         UpdateFogModeSpec(true, D3DFOG_NONE, mode);
       }
@@ -7036,8 +7042,8 @@ namespace dxvk {
       if (fogEnabled)
         UpdateFogConstants(D3DFOG_NONE);
 
-      if (m_flags.test(D3D9DeviceFlag::DirtyFogState)) {
-        m_flags.clr(D3D9DeviceFlag::DirtyFogState);
+      if (m_dirty.test(D3D9DeviceDirtyFlag::FogState)) {
+        m_dirty.clr(D3D9DeviceDirtyFlag::FogState);
 
         UpdateFogModeSpec(fogEnabled, D3DFOG_NONE, D3DFOG_NONE);
       }
@@ -7046,7 +7052,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::BindFramebuffer() {
-    m_flags.clr(D3D9DeviceFlag::DirtyFramebuffer);
+    m_dirty.clr(D3D9DeviceDirtyFlag::Framebuffer);
 
     DxvkRenderTargets attachments;
 
@@ -7187,7 +7193,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::BindViewportAndScissor() {
-    m_flags.clr(D3D9DeviceFlag::DirtyViewportScissor);
+    m_dirty.clr(D3D9DeviceDirtyFlag::ViewportScissor);
 
     // D3D9's coordinate system has its origin in the bottom left,
     // but the viewport coordinates are aligned to the top-left
@@ -7278,7 +7284,7 @@ namespace dxvk {
       alphaToCoverageEnabled &= isMultisampled;
 
       if (m_atocEnabled != alphaToCoverageEnabled) {
-        m_flags.set(D3D9DeviceFlag::DirtyMultiSampleState);
+        m_dirty.set(D3D9DeviceDirtyFlag::MultiSampleState);
         m_atocEnabled = alphaToCoverageEnabled;
       }
     }
@@ -7286,17 +7292,17 @@ namespace dxvk {
     // Update alpha test state
     bool alphaTestEnabled = m_state.renderStates[D3DRS_ALPHATESTENABLE] && !m_atocEnabled;
     if (m_alphaTestEnabled != alphaTestEnabled) {
-      m_flags.set(D3D9DeviceFlag::DirtyAlphaTestState);
+      m_dirty.set(D3D9DeviceDirtyFlag::AlphaTestState);
       m_alphaTestEnabled = alphaTestEnabled;
     }
   }
 
 
   void D3D9DeviceEx::BindMultiSampleState() {
-    m_flags.clr(D3D9DeviceFlag::DirtyMultiSampleState);
+    m_dirty.clr(D3D9DeviceDirtyFlag::MultiSampleState);
 
     DxvkMultisampleState msState = { };
-    msState.setSampleMask(m_flags.test(D3D9DeviceFlag::ValidSampleMask)
+    msState.setSampleMask(m_validSampleMask
       ? uint16_t(m_state.renderStates[D3DRS_MULTISAMPLEMASK])
       : uint16_t(0xffffu));
     msState.setAlphaToCoverage(m_atocEnabled);
@@ -7310,7 +7316,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::BindBlendState() {
-    m_flags.clr(D3D9DeviceFlag::DirtyBlendState);
+    m_dirty.clr(D3D9DeviceDirtyFlag::BlendState);
 
     auto& state = m_state.renderStates;
 
@@ -7396,7 +7402,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::BindDepthStencilState() {
-    m_flags.clr(D3D9DeviceFlag::DirtyDepthStencilState);
+    m_dirty.clr(D3D9DeviceDirtyFlag::DepthStencilState);
 
     auto& rs = m_state.renderStates;
 
@@ -7445,7 +7451,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::BindRasterizerState() {
-    m_flags.clr(D3D9DeviceFlag::DirtyRasterizerState);
+    m_dirty.clr(D3D9DeviceDirtyFlag::RasterizerState);
 
     auto& rs = m_state.renderStates;
 
@@ -7465,7 +7471,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::BindDepthBias() {
-    m_flags.clr(D3D9DeviceFlag::DirtyDepthBias);
+    m_dirty.clr(D3D9DeviceDirtyFlag::DepthBias);
 
     auto& rs = m_state.renderStates;
 
@@ -7522,7 +7528,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::BindAlphaTestState() {
-    m_flags.clr(D3D9DeviceFlag::DirtyAlphaTestState);
+    m_dirty.clr(D3D9DeviceDirtyFlag::AlphaTestState);
 
     auto& rs = m_state.renderStates;
 
@@ -7750,10 +7756,10 @@ namespace dxvk {
 
     UpdateFog();
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyFramebuffer)))
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::Framebuffer)))
       BindFramebuffer();
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyViewportScissor)))
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::ViewportScissor)))
       BindViewportAndScissor();
 
     const uint32_t activeDirtySamplers = m_textureSlotTracking.samplerStateDirty & usedTextureMask;
@@ -7764,25 +7770,25 @@ namespace dxvk {
     if (likely(usedDirtyTextures))
       UndirtyTextures(usedDirtyTextures);
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyBlendState)))
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::BlendState)))
       BindBlendState();
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyDepthStencilState)))
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::DepthStencilState)))
       BindDepthStencilState();
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyRasterizerState)))
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::RasterizerState)))
       BindRasterizerState();
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyDepthBias)))
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::DepthBias)))
       BindDepthBias();
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyMultiSampleState)))
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::MultiSampleState)))
       BindMultiSampleState();
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyAlphaTestState)))
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::AlphaTestState)))
       BindAlphaTestState();
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyClipPlanes)))
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::ClipPlanes)))
       UpdateClipPlanes();
 
     UpdatePointMode(PrimitiveType == D3DPT_POINTLIST);
@@ -7802,7 +7808,7 @@ namespace dxvk {
       UpdateFixedFunctionVS();
     }
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyInputLayout)))
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::InputLayout)))
       BindInputLayout();
 
     uint32_t projected = m_textureSlotTracking.projected;
@@ -7854,8 +7860,8 @@ namespace dxvk {
     const uint32_t drefClampMask = m_textureSlotTracking.drefClamp & depthTextureMask;
     UpdateCommonSamplerSpec(nullTextureMask, depthTextureMask, drefClampMask, projected);
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtySharedPixelShaderData))) {
-      m_flags.clr(D3D9DeviceFlag::DirtySharedPixelShaderData);
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::SharedPixelShaderData))) {
+      m_dirty.clr(D3D9DeviceDirtyFlag::SharedPixelShaderData);
 
       auto mapPtr = m_psShared.AllocSlice();
       D3D9SharedPS* data = reinterpret_cast<D3D9SharedPS*>(mapPtr);
@@ -7875,8 +7881,8 @@ namespace dxvk {
       }
     }
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyDepthBounds))) {
-      m_flags.clr(D3D9DeviceFlag::DirtyDepthBounds);
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::DepthBounds))) {
+      m_dirty.clr(D3D9DeviceDirtyFlag::DepthBounds);
 
       DxvkDepthBounds db = { };
       db.minDepthBounds = 0.0f;
@@ -7896,17 +7902,17 @@ namespace dxvk {
 
     BindSpecConstants();
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyVertexBuffers) && UploadVBOs)) {
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::VertexBuffers) && UploadVBOs)) {
       for (uint32_t i = 0; i < caps::MaxStreams; i++) {
         const D3D9VBO& vbo = m_state.vertexBuffers[i];
         BindVertexBuffer(i, vbo.vertexBuffer.ptr(), vbo.offset, vbo.stride);
       }
-      m_flags.clr(D3D9DeviceFlag::DirtyVertexBuffers);
+      m_dirty.clr(D3D9DeviceDirtyFlag::VertexBuffers);
     }
 
-    if (unlikely(m_flags.test(D3D9DeviceFlag::DirtyIndexBuffer) && UploadIBO)) {
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::IndexBuffer) && UploadIBO)) {
       BindIndices();
-      m_flags.clr(D3D9DeviceFlag::DirtyIndexBuffer);
+      m_dirty.clr(D3D9DeviceDirtyFlag::IndexBuffer);
     }
   }
 
@@ -8012,7 +8018,7 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::BindInputLayout() {
-    m_flags.clr(D3D9DeviceFlag::DirtyInputLayout);
+    m_dirty.clr(D3D9DeviceDirtyFlag::InputLayout);
 
     if (m_state.vertexDecl == nullptr) {
       EmitCs([&cIaState = m_iaState] (DxvkContext* ctx) {
@@ -8311,6 +8317,8 @@ namespace dxvk {
     key.Data.Contents.SpecularSource   = m_state.renderStates[D3DRS_SPECULARMATERIALSOURCE] & mask;
     key.Data.Contents.EmissiveSource   = m_state.renderStates[D3DRS_EMISSIVEMATERIALSOURCE] & mask;
 
+    key.Data.Contents.SpecularEnabled  = m_state.renderStates[D3DRS_SPECULARENABLE];
+
     uint32_t lightCount = 0;
 
     if (key.Data.Contents.UseLighting) {
@@ -8374,11 +8382,11 @@ namespace dxvk {
     // Shader...
     const bool useUbershader = m_d3d9Options.ffUbershaderVS;
 
-    if (useUbershader && m_flags.test(D3D9DeviceFlag::DirtyFFVertexShader)) {
-      m_flags.clr(D3D9DeviceFlag::DirtyFFVertexShader);
-      m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
-    } else if (m_flags.test(D3D9DeviceFlag::DirtyFFVertexShader)) {
-      m_flags.clr(D3D9DeviceFlag::DirtyFFVertexShader);
+    if (useUbershader && m_dirty.test(D3D9DeviceDirtyFlag::FFVertexShader)) {
+      m_dirty.clr(D3D9DeviceDirtyFlag::FFVertexShader);
+      m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
+    } else if (m_dirty.test(D3D9DeviceDirtyFlag::FFVertexShader)) {
+      m_dirty.clr(D3D9DeviceDirtyFlag::FFVertexShader);
 
       D3D9FFShaderKeyVS key = BuildFFKeyVS(vertexBlendMode, indexedVertexBlend);
 
@@ -8393,9 +8401,9 @@ namespace dxvk {
     }
 
     // Viewport...
-    if (hasPositionT && (m_flags.test(D3D9DeviceFlag::DirtyFFViewport) || m_ffZTest != IsZTestEnabled())) {
-      m_flags.clr(D3D9DeviceFlag::DirtyFFViewport);
-      m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
+    if (hasPositionT && (m_dirty.test(D3D9DeviceDirtyFlag::FFViewport) || m_ffZTest != IsZTestEnabled())) {
+      m_dirty.clr(D3D9DeviceDirtyFlag::FFViewport);
+      m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
 
       const auto& vp = m_state.viewport;
       // For us to account for the Vulkan viewport rules
@@ -8424,8 +8432,8 @@ namespace dxvk {
     }
 
     // Constants...
-    if (m_flags.test(D3D9DeviceFlag::DirtyFFVertexData)) {
-      m_flags.clr(D3D9DeviceFlag::DirtyFFVertexData);
+    if (m_dirty.test(D3D9DeviceDirtyFlag::FFVertexData)) {
+      m_dirty.clr(D3D9DeviceDirtyFlag::FFVertexData);
 
       auto mapPtr = m_vsFixedFunction.AllocSlice();
 
@@ -8461,8 +8469,8 @@ namespace dxvk {
       }
     }
 
-    if (m_flags.test(D3D9DeviceFlag::DirtyFFVertexBlend) && vertexBlendMode == D3D9FF_VertexBlendMode_Normal) {
-      m_flags.clr(D3D9DeviceFlag::DirtyFFVertexBlend);
+    if (m_dirty.test(D3D9DeviceDirtyFlag::FFVertexBlend) && vertexBlendMode == D3D9FF_VertexBlendMode_Normal) {
+      m_dirty.clr(D3D9DeviceDirtyFlag::FFVertexBlend);
 
       auto mapPtr = m_vsVertexBlend.AllocSlice();
       auto UploadVertexBlendData = [&](auto data) {
@@ -8552,17 +8560,17 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::UpdateFixedFunctionPS() {
-    if (unlikely(!m_flags.test(D3D9DeviceFlag::DirtyFFPixelShader) && !m_flags.test(D3D9DeviceFlag::DirtyFFPixelData)))
+    if (unlikely(!m_dirty.test(D3D9DeviceDirtyFlag::FFPixelShader) && !m_dirty.test(D3D9DeviceDirtyFlag::FFPixelData)))
       return;
 
     // Shader...
     const bool useUbershader = m_d3d9Options.ffUbershaderFS;
 
     D3D9FFShaderKeyFS key = BuildFFKeyFS();
-    if (useUbershader && m_flags.test(D3D9DeviceFlag::DirtyFFPixelShader)) {
+    if (useUbershader && m_dirty.test(D3D9DeviceDirtyFlag::FFPixelShader)) {
       // The flags are set based on the specialized shaders.
-      m_flags.clr(D3D9DeviceFlag::DirtyFFPixelShader);
-      m_flags.set(D3D9DeviceFlag::DirtyFFPixelData);
+      m_dirty.clr(D3D9DeviceDirtyFlag::FFPixelShader);
+      m_dirty.set(D3D9DeviceDirtyFlag::FFPixelData);
 
       // Spec constants...
       uint32_t activeTextureStageCount;
@@ -8600,10 +8608,10 @@ namespace dxvk {
         }
       }
       if (dirty) {
-        m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+        m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
       }
-    } else if (m_flags.test(D3D9DeviceFlag::DirtyFFPixelShader)) {
-      m_flags.clr(D3D9DeviceFlag::DirtyFFPixelShader);
+    } else if (m_dirty.test(D3D9DeviceDirtyFlag::FFPixelShader)) {
+      m_dirty.clr(D3D9DeviceDirtyFlag::FFPixelShader);
 
       EmitCs([
         this,
@@ -8616,8 +8624,8 @@ namespace dxvk {
     }
 
     // Constants...
-    if (m_flags.test(D3D9DeviceFlag::DirtyFFPixelData)) {
-      m_flags.clr(D3D9DeviceFlag::DirtyFFPixelData);
+    if (m_dirty.test(D3D9DeviceDirtyFlag::FFPixelData)) {
+      m_dirty.clr(D3D9DeviceDirtyFlag::FFPixelData);
 
       auto mapPtr = m_psFixedFunction.AllocSlice();
       auto& rs = m_state.renderStates;
@@ -8845,7 +8853,7 @@ namespace dxvk {
     BindMultiSampleState();
 
     rs[D3DRS_TEXTUREFACTOR]       = 0xffffffff;
-    m_flags.set(D3D9DeviceFlag::DirtyFFPixelData);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFPixelData);
 
     rs[D3DRS_DIFFUSEMATERIALSOURCE]  = D3DMCS_COLOR1;
     rs[D3DRS_SPECULARMATERIALSOURCE] = D3DMCS_COLOR2;
@@ -8856,13 +8864,13 @@ namespace dxvk {
     rs[D3DRS_LOCALVIEWER]            = TRUE;
     rs[D3DRS_RANGEFOGENABLE]         = FALSE;
     rs[D3DRS_NORMALIZENORMALS]       = FALSE;
-    m_flags.set(D3D9DeviceFlag::DirtyFFVertexShader);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
 
     // PS
     rs[D3DRS_SPECULARENABLE] = FALSE;
 
     rs[D3DRS_AMBIENT]                = 0;
-    m_flags.set(D3D9DeviceFlag::DirtyFFVertexData);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
 
     rs[D3DRS_FOGENABLE]                  = FALSE;
     rs[D3DRS_FOGCOLOR]                   = 0;
@@ -8871,14 +8879,14 @@ namespace dxvk {
     rs[D3DRS_FOGEND]                     = bit::cast<DWORD>(1.0f);
     rs[D3DRS_FOGDENSITY]                 = bit::cast<DWORD>(1.0f);
     rs[D3DRS_FOGVERTEXMODE]              = D3DFOG_NONE;
-    m_flags.set(D3D9DeviceFlag::DirtyFogColor);
-    m_flags.set(D3D9DeviceFlag::DirtyFogDensity);
-    m_flags.set(D3D9DeviceFlag::DirtyFogEnd);
-    m_flags.set(D3D9DeviceFlag::DirtyFogScale);
-    m_flags.set(D3D9DeviceFlag::DirtyFogState);
+    m_dirty.set(D3D9DeviceDirtyFlag::FogColor);
+    m_dirty.set(D3D9DeviceDirtyFlag::FogDensity);
+    m_dirty.set(D3D9DeviceDirtyFlag::FogEnd);
+    m_dirty.set(D3D9DeviceDirtyFlag::FogScale);
+    m_dirty.set(D3D9DeviceDirtyFlag::FogState);
 
     rs[D3DRS_CLIPPLANEENABLE] = 0;
-    m_flags.set(D3D9DeviceFlag::DirtyClipPlanes);
+    m_dirty.set(D3D9DeviceDirtyFlag::ClipPlanes);
 
     const auto& limits = m_dxvkDevice->adapter()->deviceProperties().core.properties.limits;
 
@@ -8893,7 +8901,7 @@ namespace dxvk {
     UpdatePushConstant<D3D9RenderStateItem::PointSize>();
     UpdatePushConstant<D3D9RenderStateItem::PointSizeMin>();
     UpdatePushConstant<D3D9RenderStateItem::PointSizeMax>();
-    m_flags.set(D3D9DeviceFlag::DirtyPointScale);
+    m_dirty.set(D3D9DeviceDirtyFlag::PointScale);
     UpdatePointMode(false);
 
     rs[D3DRS_SRGBWRITEENABLE]            = 0;
@@ -8903,7 +8911,7 @@ namespace dxvk {
     rs[D3DRS_VERTEXBLEND]                = D3DVBF_DISABLE;
     rs[D3DRS_INDEXEDVERTEXBLENDENABLE]   = FALSE;
     rs[D3DRS_TWEENFACTOR]                = bit::cast<DWORD>(0.0f);
-    m_flags.set(D3D9DeviceFlag::DirtyFFVertexBlend);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexBlend);
 
     // Render States not implemented beyond this point.
     rs[D3DRS_LASTPIXEL]                  = TRUE;
@@ -8962,8 +8970,8 @@ namespace dxvk {
       stage[DXVK_TSS_RESULTARG]             = D3DTA_CURRENT;
       stage[DXVK_TSS_CONSTANT]              = 0x00000000;
     }
-    m_flags.set(D3D9DeviceFlag::DirtySharedPixelShaderData);
-    m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
+    m_dirty.set(D3D9DeviceDirtyFlag::SharedPixelShaderData);
+    m_dirty.set(D3D9DeviceDirtyFlag::FFPixelShader);
 
     for (uint32_t i = 0; i < caps::MaxStreams; i++)
       m_state.streamFreq[i] = 1;
@@ -9015,7 +9023,7 @@ namespace dxvk {
     }
 
     // We should do this...
-    m_flags.set(D3D9DeviceFlag::DirtyInputLayout);
+    m_dirty.set(D3D9DeviceDirtyFlag::InputLayout);
 
     UpdatePixelShaderSamplerSpec(0u, 0u);
     UpdateVertexBoolSpec(0u);
@@ -9268,19 +9276,19 @@ namespace dxvk {
          dirty |= m_specInfo.set<SpecAlphaPrecisionBits>(precision);
 
     if (dirty)
-      m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+      m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
   }
 
 
   void D3D9DeviceEx::UpdateVertexBoolSpec(uint32_t value) {
     if (m_specInfo.set<SpecVertexShaderBools>(value))
-      m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+      m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
   }
 
 
   void D3D9DeviceEx::UpdatePixelBoolSpec(uint32_t value) {
     if (m_specInfo.set<SpecPixelShaderBools>(value))
-      m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+      m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
   }
 
 
@@ -9289,7 +9297,7 @@ namespace dxvk {
          dirty |= m_specInfo.set<SpecSamplerFetch4>(fetch4);
 
     if (dirty)
-      m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+      m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
   }
 
 
@@ -9300,13 +9308,13 @@ namespace dxvk {
          dirty |= m_specInfo.set<SpecSamplerProjected>(projections);
 
     if (dirty)
-      m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+      m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
   }
 
 
   void D3D9DeviceEx::UpdatePointModeSpec(uint32_t mode) {
     if (m_specInfo.set<SpecPointMode>(mode))
-      m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+      m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
   }
 
 
@@ -9316,12 +9324,12 @@ namespace dxvk {
          dirty |= m_specInfo.set<SpecPixelFogMode>(pixelFogMode);
 
     if (dirty)
-      m_flags.set(D3D9DeviceFlag::DirtySpecializationEntries);
+      m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
   }
 
 
   void D3D9DeviceEx::BindSpecConstants() {
-    if (!m_flags.test(D3D9DeviceFlag::DirtySpecializationEntries))
+    if (!m_dirty.test(D3D9DeviceDirtyFlag::SpecializationEntries))
       return;
 
     EmitCs([cSpecInfo = m_specInfo](DxvkContext* ctx) {
@@ -9336,7 +9344,7 @@ namespace dxvk {
       memcpy(mapPtr, m_specInfo.data.data(), D3D9SpecializationInfo::UBOSize);
     }
 
-    m_flags.clr(D3D9DeviceFlag::DirtySpecializationEntries);
+    m_dirty.clr(D3D9DeviceDirtyFlag::SpecializationEntries);
   }
 
 

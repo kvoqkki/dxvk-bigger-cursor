@@ -1116,6 +1116,16 @@ namespace dxvk {
     { R"(\\RRRE(64)?\.exe$)", {{
       { "d3d9.hideNvidiaGpu",               "True" },
     }} },
+    /* Blitzkrieg 2 - Startup crash               */
+    { R"(\\Blitzkrieg 2( - Fall of the Reich| - Liberation)?\\bin\\game\.exe$)", {{
+      { "d3d9.memoryTrackTest",             "True" },
+    }} },
+    /* Core Awaken series (Jilelen and LittleSnow/The Yuka) & *
+     * Mine Dungeon 2 ~Rurumu's trip~                         *
+     * Freezes on boot                                        */
+    { R"(\\(BioDungeon|BioLab2|MineDungeon2)\.exe$)", {{
+      { "d3d9.countLosableResources",      "False" },
+    }} },
 
     /**********************************************/
     /* D3D8 GAMES                                 */

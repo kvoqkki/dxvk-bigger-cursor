@@ -950,7 +950,7 @@ namespace dxvk {
     for (uint32_t i = 1; i < rotatingBufferCount; i++)
       m_backBuffers[i]->Swap(m_backBuffers[i - 1].ptr());
 
-    m_parent->m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+    m_parent->m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
   }
 
 
@@ -1239,6 +1239,8 @@ namespace dxvk {
     
     m_monitor = wsi::getDefaultMonitor();
 
+    wsi::saveWindowState(m_window, &m_windowState, true);
+
     if (!wsi::enterFullscreenMode(m_monitor, m_window, &m_windowState, true)) {
         Logger::err("D3D9: EnterFullscreenMode: Failed to enter fullscreen mode");
         return D3DERR_INVALIDCALL;
@@ -1261,10 +1263,11 @@ namespace dxvk {
 
     ResetWindowProc(m_window);
     
-    if (!wsi::leaveFullscreenMode(m_window, &m_windowState, false)) {
+    if (!wsi::leaveFullscreenMode(m_window, &m_windowState)) {
       Logger::err("D3D9: LeaveFullscreenMode: Failed to exit fullscreen mode");
       return D3DERR_NOTAVAILABLE;
     }
+    wsi::restoreWindowState(m_window, &m_windowState, false);
 
     m_parent->NotifyFullscreen(m_window, false);
     

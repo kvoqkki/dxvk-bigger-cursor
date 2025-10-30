@@ -218,6 +218,9 @@ uint transformFlags() {
 uint lightCount() {
     return bitfieldExtract(data.KeyPrimitives[2], 24, 4);
 }
+bool specularEnabled() {
+    return bitfieldExtract(data.KeyPrimitives[2], 28, 1) != 0;
+}
 
 uint vertexTexcoordDeclMask() {
     return bitfieldExtract(data.KeyPrimitives[3], 0, 24);
@@ -240,7 +243,7 @@ bool vertexClipping() {
 
 
 float calculateFog(vec4 vPos, vec4 oColor) {
-    vec4 color1 = vertexHasColor1() ? in_Color1 : vec4(0.0);
+    vec4 color1 = vertexHasColor1() ? in_Color1 : vec4(0.0, 0.0, 0.0, 1.0);
 
     vec4 specular = color1;
     bool hasSpecular = vertexHasColor1();
@@ -348,12 +351,12 @@ void emitVsClipping(vec4 vtx) {
 
 
 vec4 pickMaterialSource(uint source, vec4 material) {
-    if (source == D3DMCS_MATERIAL)
-        return material;
-    else if (source == D3DMCS_COLOR1)
-        return vertexHasColor0() ? in_Color0 : vec4(1.0);
+    if (source == D3DMCS_COLOR1 && vertexHasColor0())
+        return in_Color0;
+    else if (source == D3DMCS_COLOR2 && vertexHasColor1())
+        return in_Color1;
     else
-        return vertexHasColor1() ? in_Color1 : vec4(0.0);
+        return material;
 }
 
 
@@ -690,10 +693,14 @@ void main() {
         finalColor1 = clamp(finalColor1, vec4(0.0), vec4(1.0));
 
         out_Color0 = finalColor0;
-        out_Color1 = finalColor1;
+        if (specularEnabled()) {
+            out_Color1 = finalColor1;
+        } else {
+            out_Color1 = vertexHasColor1() ? in_Color1 : vec4(0.0, 0.0, 0.0, 1.0);
+        }
     } else {
-        out_Color0 = vertexHasColor0() ? in_Color0 : vec4(1.0);
-        out_Color1 = vertexHasColor1() ? in_Color1 : vec4(0.0);
+        out_Color0 = vertexHasColor0() ? in_Color0 : vec4(0.0, 0.0, 0.0, 1.0);
+        out_Color1 = vertexHasColor1() ? in_Color1 : vec4(0.0, 0.0, 0.0, 1.0);
     }
 
     out_Fog = calculateFog(vtx, vec4(0.0));
