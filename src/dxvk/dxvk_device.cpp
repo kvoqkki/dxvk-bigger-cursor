@@ -1,6 +1,5 @@
 #include "dxvk_device.h"
 #include "dxvk_instance.h"
-#include "dxvk_latency_builtin.h"
 #include "dxvk_latency_reflex.h"
 #include "dxvk_shader_cache.h"
 #include "dxvk_shader_ir.h"
@@ -545,18 +544,11 @@ namespace dxvk {
 
   Rc<DxvkLatencyTracker> DxvkDevice::createLatencyTracker(
     const Rc<Presenter>&            presenter) {
-    if (m_options.latencySleep == Tristate::False)
+    // Reflex is broken on 32-bit drivers, but there are no known apps anyway
+    if (!m_features.nvLowLatency2 || env::is32BitHostPlatform())
       return nullptr;
 
-    if (m_options.latencySleep == Tristate::Auto) {
-      if (m_features.nvLowLatency2)
-        return new DxvkReflexLatencyTrackerNv(presenter);
-      else
-        return nullptr;
-    }
-
-    return new DxvkBuiltInLatencyTracker(presenter,
-      m_options.latencyTolerance, m_features.nvLowLatency2);
+    return new DxvkReflexLatencyTrackerNv(presenter);
   }
 
 
@@ -658,8 +650,10 @@ namespace dxvk {
   
   DxvkDevicePerfHints DxvkDevice::getPerfHints() {
     DxvkDevicePerfHints hints;
+
+    // RADV properly fuses depth-stencil copies now
     hints.preferFbDepthStencilCopy = m_features.extShaderStencilExport
-      && (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV_KHR)
+      && (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV_KHR, Version(), Version(25, 3, 99))
        || m_adapter->matchesDriver(VK_DRIVER_ID_AMD_OPEN_SOURCE_KHR)
        || m_adapter->matchesDriver(VK_DRIVER_ID_AMD_PROPRIETARY_KHR));
 
@@ -742,8 +736,8 @@ namespace dxvk {
     }
 
     // Converting unsigned integers to float should return an unsigned float,
-    // but Nvidia drivers don't agree
-    if (m_adapter->matchesDriver(VK_DRIVER_ID_NVIDIA_PROPRIETARY))
+    // but Nvidia drivers prior to 580 don't agree
+    if (m_adapter->matchesDriver(VK_DRIVER_ID_NVIDIA_PROPRIETARY, Version(), Version(580u, 0u, 0u)))
       m_shaderOptions.flags.set(DxvkShaderCompileFlag::LowerItoF);
 
     // Forward UBO device limit as-is

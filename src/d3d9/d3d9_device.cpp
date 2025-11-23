@@ -2580,7 +2580,7 @@ namespace dxvk {
               && m_state.renderStates[D3DRS_ZENABLE])) {
               // Whether we write the depth has been changed => check for hazards
               UpdateActiveHazardsDS(std::numeric_limits<uint32_t>::max());
-              }
+            }
 
             m_dirty.set(D3D9DeviceDirtyFlag::DepthStencilState);
           }
@@ -6071,7 +6071,7 @@ namespace dxvk {
     uint64_t chunkId = GetCurrentSequenceNumber();
     uint64_t submissionId = m_submissionFence->value();
 
-    if (m_flushTracker.considerFlush(FlushType, chunkId, submissionId))
+    if (m_flushTracker.considerFlush(FlushType, chunkId, submissionId, 0u))
       Flush();
   }
 
@@ -6643,7 +6643,7 @@ namespace dxvk {
 
   inline void D3D9DeviceEx::UpdateActiveHazardsRT(uint32_t texMask) {
     uint32_t oldHazardMask             = m_textureSlotTracking.hazardRT;
-    uint32_t oldUnresolvableHazardMask = m_textureSlotTracking.hazardRT;
+    uint32_t oldUnresolvableHazardMask = m_textureSlotTracking.unresolvableHazardRT;
     m_textureSlotTracking.hazardRT             &= ~texMask;
     m_textureSlotTracking.unresolvableHazardRT &= ~texMask;
 
@@ -6668,18 +6668,22 @@ namespace dxvk {
         if (likely(rtSurf->GetMipLevel() != 0 || rtBase != texBase))
           continue;
 
+        const bool sampledInShader = !!(psMasks.samplerMask & (1 << samplerIdx));
+        const bool wasHazard = !!(oldHazardMask & (1 << samplerIdx));
+
         // If the shader doesn't actually use the texture, keep it marked as a hazard
         // to avoid spilling the render pass over and over again because of shader changes.
-        if (!((psMasks.samplerMask | oldHazardMask) & (1 << samplerIdx)))
+        if (unlikely(!sampledInShader && ((anyColorWrite && shaderWritesToRt) || !wasHazard)))
           continue;
 
         // We can resolve the hazard by unbinding the RT.
         m_textureSlotTracking.hazardRT |= 1 << samplerIdx;
 
         // Don't mark texture as an unresolvable hazard if the shader doesn't actually use it.
-        if (!(psMasks.samplerMask & (1 << samplerIdx)))
+        if (unlikely(!sampledInShader))
           continue;
 
+        // The hazard can be resolved by not binding it.
         if (likely(!anyColorWrite || !shaderWritesToRt))
           continue;
 
@@ -6718,17 +6722,24 @@ namespace dxvk {
       if (likely(dsBase != texBase))
         continue;
 
-      // If the shader doesn't actually use the texture, keep it marked as a hazard
-      // to avoid spilling the render pass over and over again because of shader changes.
-      if (!((psMasks.samplerMask | oldHazardMask) & (1 << samplerIdx)))
+      const bool sampledInShader = !!(psMasks.samplerMask & (1 << samplerIdx));
+      const bool wasHazard = !!(oldHazardMask & (1 << samplerIdx));
+
+      // Don't mark it as a hazard if the current shader doesn't actually sample it
+      // but we need to render to it.
+      // If the shader doesn't actually sample the texture, we don't render to it
+      // and it was a hazard before, keep it marked as a hazard to avoid spilling
+      // the render pass over and over again because of shader changes.
+      if (unlikely(!sampledInShader && (depthWrite || !wasHazard)))
         continue;
 
       m_textureSlotTracking.hazardDS |= 1 << samplerIdx;
 
       // Don't mark texture as an unresolvable hazard if the shader doesn't actually use it.
-      if (!(psMasks.samplerMask & (1 << samplerIdx)))
+      if (unlikely(!sampledInShader))
         continue;
 
+      // The hazard can be resolved by binding it as READONLY.
       if (unlikely(!depthWrite))
         continue;
 
@@ -7891,6 +7902,11 @@ namespace dxvk {
       if (m_nvdbEnabled) {
         db.minDepthBounds = std::clamp(bit::cast<float>(m_state.renderStates[D3DRS_ADAPTIVETESS_Z]), 0.0f, 1.0f);
         db.maxDepthBounds = std::clamp(bit::cast<float>(m_state.renderStates[D3DRS_ADAPTIVETESS_W]), 0.0f, 1.0f);
+
+        if (db.maxDepthBounds < db.minDepthBounds) {
+          db.minDepthBounds = 0.0f;
+          db.maxDepthBounds = 1.0f;
+        }
       }
 
       EmitCs([
