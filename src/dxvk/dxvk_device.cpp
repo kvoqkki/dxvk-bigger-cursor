@@ -1,5 +1,6 @@
 #include "dxvk_device.h"
 #include "dxvk_instance.h"
+#include "dxvk_latency_builtin.h"
 #include "dxvk_latency_reflex.h"
 #include "dxvk_shader_cache.h"
 #include "dxvk_shader_ir.h"
@@ -24,6 +25,16 @@ namespace dxvk {
     m_perfHints         (getPerfHints()),
     m_objects           (this),
     m_submissionQueue   (this, queueCallback) {
+
+    if (adapter->kmtLocal()) {
+      D3DKMT_CREATEDEVICE create = { };
+      create.hAdapter = adapter->kmtLocal();
+      if (D3DKMTCreateDevice(&create))
+        Logger::warn("Failed to create D3DKMT device");
+      else
+        m_kmtLocal = create.hDevice;
+    }
+
     determineShaderOptions();
 
     if (env::getEnvVar("DXVK_SHADER_CACHE") != "0" && DxvkShader::getShaderDumpPath().empty())
@@ -32,6 +43,12 @@ namespace dxvk {
   
   
   DxvkDevice::~DxvkDevice() {
+    if (m_kmtLocal) {
+      D3DKMT_DESTROYDEVICE destroy = { };
+      destroy.hDevice = m_kmtLocal;
+      D3DKMTDestroyDevice(&destroy);
+    }
+
     // If we are being destroyed during/after DLL process detachment
     // from TerminateProcess, etc, our CS threads are already destroyed
     // and we cannot synchronize against them.
@@ -544,11 +561,18 @@ namespace dxvk {
 
   Rc<DxvkLatencyTracker> DxvkDevice::createLatencyTracker(
     const Rc<Presenter>&            presenter) {
-    // Reflex is broken on 32-bit drivers, but there are no known apps anyway
-    if (!m_features.nvLowLatency2 || env::is32BitHostPlatform())
+    if (m_options.latencySleep == Tristate::False)
       return nullptr;
 
-    return new DxvkReflexLatencyTrackerNv(presenter);
+    if (m_options.latencySleep == Tristate::Auto) {
+      if (m_features.nvLowLatency2)
+        return new DxvkReflexLatencyTrackerNv(presenter);
+      else
+        return nullptr;
+    }
+
+    return new DxvkBuiltInLatencyTracker(presenter,
+      m_options.latencyTolerance, m_features.nvLowLatency2);
   }
 
 
