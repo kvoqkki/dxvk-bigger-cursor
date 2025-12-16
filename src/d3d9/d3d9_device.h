@@ -1333,7 +1333,9 @@ namespace dxvk {
     /**
      * \brief Waits until the amount of used staging memory is below a certain threshold.
      */
-    void WaitStagingBuffer();
+    void ThrottleAllocation();
+
+    DxvkStagingBufferStats GetStagingMemoryStatistics() const;
 
     HRESULT               CreateShaderModule(
             D3D9CommonShader*     pShaderModule,
@@ -1585,7 +1587,10 @@ namespace dxvk {
       HANDLE                        handle,
       const dxvk::D3D9_BUFFER_DESC& bufferDesc) const;
 
+    bool HasFormatsUnlocked() const { return m_unlockAdditionalFormats; }
+
     Com<D3D9InterfaceEx>            m_parent;
+    D3D9Options                     m_d3d9Options;
     D3DDEVTYPE                      m_deviceType;
     HWND                            m_window;
     WORD                            m_behaviorFlags;
@@ -1628,6 +1633,9 @@ namespace dxvk {
     Rc<sync::Fence>                 m_stagingBufferFence;
     VkDeviceSize                    m_stagingMemorySignaled = 0ull;
 
+    VkDeviceSize                    m_discardMemoryCounter = 0u;
+    VkDeviceSize                    m_discardMemoryOnFlush = 0u;
+
     D3D9Cursor                      m_cursor;
     std::unordered_map<std::string, struct D3D9SideloadCursor> m_sideloadCursors;
 
@@ -1637,7 +1645,6 @@ namespace dxvk {
 
     Com<D3D9SwapChainEx, false>     m_implicitSwapchain;
 
-    const D3D9Options               m_d3d9Options;
     DxsoOptions                     m_dxsoOptions;
 
     std::unordered_map<
@@ -1735,6 +1742,8 @@ namespace dxvk {
     // Written by CS thread
     alignas(CACHE_LINE_SIZE)
     std::atomic<uint64_t>           m_lastSamplerStats = { 0u };
+
+    bool m_unlockAdditionalFormats = false;
   };
 
 }

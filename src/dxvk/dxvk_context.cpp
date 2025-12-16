@@ -1961,12 +1961,27 @@ namespace dxvk {
   }
   
   
+  VkAttachmentStoreOp DxvkContext::determineClearStoreOp(
+          VkAttachmentLoadOp        loadOp) const {
+    if (loadOp == VK_ATTACHMENT_LOAD_OP_NONE)
+      return VK_ATTACHMENT_STORE_OP_NONE;
+
+    if (loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+      return VK_ATTACHMENT_STORE_OP_DONT_CARE;
+
+    return VK_ATTACHMENT_STORE_OP_STORE;
+  }
+
+
   void DxvkContext::performClear(
     const Rc<DxvkImageView>&        imageView,
           int32_t                   attachmentIndex,
           VkImageAspectFlags        discardAspects,
           VkImageAspectFlags        clearAspects,
           VkClearValue              clearValue) {
+    bool hasLoadOpNone = m_device->features().khrLoadStoreOpNone &&
+      m_device->properties().khrMaintenance7.separateDepthStencilAttachmentAccess;
+
     DxvkColorAttachmentOps colorOp;
     colorOp.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     
@@ -1983,11 +1998,15 @@ namespace dxvk {
       depthOp.loadOpD = VK_ATTACHMENT_LOAD_OP_CLEAR;
     else if (discardAspects & VK_IMAGE_ASPECT_DEPTH_BIT)
       depthOp.loadOpD = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    
+    else if (hasLoadOpNone)
+      depthOp.loadOpD = VK_ATTACHMENT_LOAD_OP_NONE;
+
     if (clearAspects & VK_IMAGE_ASPECT_STENCIL_BIT)
       depthOp.loadOpS = VK_ATTACHMENT_LOAD_OP_CLEAR;
     else if (discardAspects & VK_IMAGE_ASPECT_STENCIL_BIT)
       depthOp.loadOpS = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    else if (hasLoadOpNone)
+      depthOp.loadOpS = VK_ATTACHMENT_LOAD_OP_NONE;
 
     if (attachmentIndex >= 0 && !m_state.om.framebufferInfo.isWritable(attachmentIndex, clearAspects | discardAspects)) {
       // Do not fold the clear/discard into the render pass if any of the affected aspects
@@ -2015,7 +2034,6 @@ namespace dxvk {
       VkRenderingAttachmentInfo attachmentInfo = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
       attachmentInfo.imageView = imageView->handle();
       attachmentInfo.imageLayout = imageView->getLayout();
-      attachmentInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
       attachmentInfo.clearValue = clearValue;
 
       VkRenderingAttachmentInfo stencilInfo = attachmentInfo;
@@ -2035,6 +2053,7 @@ namespace dxvk {
                     |  VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
 
         attachmentInfo.loadOp = colorOp.loadOp;
+        attachmentInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
         if (useLateClear && attachmentInfo.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
           attachmentInfo.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -2049,12 +2068,16 @@ namespace dxvk {
 
         if (imageView->info().aspects & VK_IMAGE_ASPECT_DEPTH_BIT) {
           renderingInfo.pDepthAttachment = &attachmentInfo;
+
           attachmentInfo.loadOp = depthOp.loadOpD;
+          attachmentInfo.storeOp = determineClearStoreOp(depthOp.loadOpD);
         }
 
         if (imageView->info().aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
           renderingInfo.pStencilAttachment = &stencilInfo;
+
           stencilInfo.loadOp = depthOp.loadOpS;
+          stencilInfo.storeOp = determineClearStoreOp(depthOp.loadOpS);
         }
       }
 
@@ -2219,6 +2242,12 @@ namespace dxvk {
       clearRect.layerCount = m_state.om.renderingInfo.rendering.layerCount;
 
       m_cmd->cmdClearAttachments(attachments.size(), attachments.data(), 1u, &clearRect);
+
+      // Full clears require the render area to cover everything
+      m_state.om.renderAreaLo = VkOffset2D { 0, 0 };
+      m_state.om.renderAreaHi = VkOffset2D {
+        int32_t(clearRect.rect.extent.width),
+        int32_t(clearRect.rect.extent.height) };
     }
 
     m_deferredClears.clear();
@@ -2459,25 +2488,42 @@ namespace dxvk {
     auto& renderingInfo = m_state.om.renderingInfo;
 
     // Track attachment access for render pass clears and resolves
+    bool hasClearOrResolve = false;
+
     for (uint32_t i = 0; i < renderingInfo.rendering.colorAttachmentCount; i++) {
-      if (renderingInfo.color[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+      if (renderingInfo.color[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
         m_state.om.attachmentMask.trackColorWrite(i);
-      if (renderingInfo.color[i].resolveImageView && renderingInfo.color[i].resolveMode)
+        hasClearOrResolve = true;
+      }
+
+      if (renderingInfo.color[i].resolveImageView && renderingInfo.color[i].resolveMode) {
         m_state.om.attachmentMask.trackColorRead(i);
+        hasClearOrResolve = true;
+      }
     }
 
     if (renderingInfo.rendering.pDepthAttachment) {
-      if (renderingInfo.depth.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+      if (renderingInfo.depth.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
         m_state.om.attachmentMask.trackDepthWrite();
-      if (renderingInfo.depth.resolveImageView && renderingInfo.depth.resolveMode)
+        hasClearOrResolve = true;
+      }
+
+      if (renderingInfo.depth.resolveImageView && renderingInfo.depth.resolveMode) {
         m_state.om.attachmentMask.trackDepthRead();
+        hasClearOrResolve = true;
+      }
     }
 
     if (renderingInfo.rendering.pStencilAttachment) {
-      if (renderingInfo.stencil.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+      if (renderingInfo.stencil.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
         m_state.om.attachmentMask.trackStencilWrite();
-      if (renderingInfo.stencil.resolveImageView && renderingInfo.stencil.resolveMode)
+        hasClearOrResolve = true;
+      }
+
+      if (renderingInfo.stencil.resolveImageView && renderingInfo.stencil.resolveMode) {
         m_state.om.attachmentMask.trackStencilRead();
+        hasClearOrResolve = true;
+      }
     }
 
     // If we don't have maintenance7 support, we need to pretend that accessing
@@ -2499,6 +2545,16 @@ namespace dxvk {
     if (renderingInfo.rendering.pStencilAttachment) {
       adjustAttachmentLoadStoreOps(renderingInfo.stencil,
         m_state.om.attachmentMask.getStencilAccess());
+    }
+
+    // If we can prove that the app has only rendered to a portion of
+    // the image, adjust the render area to the exact rendered region.
+    if (!hasClearOrResolve && m_state.om.renderAreaLo.x < m_state.om.renderAreaHi.x
+                           && m_state.om.renderAreaLo.y < m_state.om.renderAreaHi.y) {
+      renderingInfo.rendering.renderArea.offset = m_state.om.renderAreaLo;
+      renderingInfo.rendering.renderArea.extent = VkExtent2D {
+        uint32_t(m_state.om.renderAreaHi.x - m_state.om.renderAreaLo.x),
+        uint32_t(m_state.om.renderAreaHi.y - m_state.om.renderAreaLo.y) };
     }
   }
 
@@ -2730,6 +2786,8 @@ namespace dxvk {
     }
 
     if (unlikely(rs.sampleCount() != m_state.gp.state.rs.sampleCount())) {
+      m_flags.set(DxvkContextFlag::GpDirtySampleLocations);
+
       if (!m_state.gp.state.ms.sampleCount())
         m_flags.set(DxvkContextFlag::GpDirtyMultisampleState);
 
@@ -3261,6 +3319,9 @@ namespace dxvk {
 
     m_cmd->cmdDraw(3, pushConstants.layerCount, 0, 0);
     m_cmd->cmdEndRendering();
+
+    if (unlikely(m_features.test(DxvkContextFeature::DebugUtils)))
+      m_cmd->cmdEndDebugUtilsLabel(DxvkCmdBuffer::ExecBuffer);
 
     m_cmd->track(std::move(sampler));
   }
@@ -3960,6 +4021,14 @@ namespace dxvk {
 
       if (aspect & VK_IMAGE_ASPECT_STENCIL_BIT)
         m_state.om.attachmentMask.trackStencilWrite();
+
+      // Inline clears may affect render area
+      m_state.om.renderAreaLo = VkOffset2D {
+        std::min(m_state.om.renderAreaLo.x, offset.x),
+        std::min(m_state.om.renderAreaLo.y, offset.y) };
+      m_state.om.renderAreaHi = VkOffset2D {
+        std::min(m_state.om.renderAreaHi.x, int32_t(offset.x + extent.width)),
+        std::min(m_state.om.renderAreaHi.y, int32_t(offset.y + extent.height)) };
     }
 
     // Perform the actual clear operation
@@ -5092,6 +5161,7 @@ namespace dxvk {
         DxvkContextFlag::GpDirtyStencilRef,
         DxvkContextFlag::GpDirtyMultisampleState,
         DxvkContextFlag::GpDirtyRasterizerState,
+        DxvkContextFlag::GpDirtySampleLocations,
         DxvkContextFlag::GpDirtyViewport,
         DxvkContextFlag::GpDirtyDepthBias,
         DxvkContextFlag::GpDirtyDepthBounds,
@@ -5273,6 +5343,8 @@ namespace dxvk {
     std::array<VkFormat, MaxNumRenderTargets> colorFormats = { };
     std::array<VkClearAttachment, MaxNumRenderTargets> lateClears = { };
 
+    bool hasMipmappedRt = false;
+
     for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
       const auto& colorTarget = framebufferInfo.getColorTarget(i);
 
@@ -5304,6 +5376,8 @@ namespace dxvk {
         }
 
         colorInfoCount = i + 1;
+
+        hasMipmappedRt |= colorTarget.view->image()->info().mipLevels > 1u;
       }
     }
 
@@ -5375,6 +5449,13 @@ namespace dxvk {
       renderingInheritance.stencilAttachmentFormat = depthStencilFormat;
     }
 
+    // Reset render area tracking, will be adjusted when drawing with viewports.
+    m_state.om.renderAreaLo = VkOffset2D { int32_t(fbSize.width), int32_t(fbSize.height) };
+    m_state.om.renderAreaHi = VkOffset2D { 0, 0 };
+
+    if (lateClearCount)
+      std::swap(m_state.om.renderAreaLo, m_state.om.renderAreaHi);
+
     // On drivers that don't natively support secondary command buffers, only use
     // them to enable MSAA resolve attachments. Also ignore render passes with only
     // one color attachment here since those tend to only have a small number of
@@ -5386,7 +5467,7 @@ namespace dxvk {
       useSecondaryCmdBuffer = renderingInheritance.rasterizationSamples > VK_SAMPLE_COUNT_1_BIT;
 
       if (!m_device->perfHints().preferPrimaryCmdBufs)
-        useSecondaryCmdBuffer |= depthStencilAspects || colorInfoCount > 1u;
+        useSecondaryCmdBuffer |= depthStencilAspects || colorInfoCount > 1u || !hasMipmappedRt;
     }
 
     if (useSecondaryCmdBuffer) {
@@ -5603,6 +5684,7 @@ namespace dxvk {
                 DxvkContextFlag::GpDirtyStencilRef,
                 DxvkContextFlag::GpDirtyMultisampleState,
                 DxvkContextFlag::GpDirtyRasterizerState,
+                DxvkContextFlag::GpDirtySampleLocations,
                 DxvkContextFlag::GpDirtyViewport,
                 DxvkContextFlag::GpDirtyDepthBias,
                 DxvkContextFlag::GpDirtyDepthBounds,
@@ -5662,6 +5744,7 @@ namespace dxvk {
                 DxvkContextFlag::GpDynamicStencilTest,
                 DxvkContextFlag::GpDynamicMultisampleState,
                 DxvkContextFlag::GpDynamicRasterizerState,
+                DxvkContextFlag::GpDynamicSampleLocations,
                 DxvkContextFlag::GpHasPushData,
                 DxvkContextFlag::GpIndependentSets);
     
@@ -5706,7 +5789,10 @@ namespace dxvk {
         m_flags.set(m_state.gp.flags.test(DxvkGraphicsPipelineFlag::HasSampleRateShading)
           ? DxvkContextFlag::GpDynamicMultisampleState
           : DxvkContextFlag::GpDirtyMultisampleState);
-       }
+      }
+
+      if (m_device->canUseSampleLocations(0u))
+        m_flags.set(DxvkContextFlag::GpDynamicSampleLocations);
     } else {
       if (m_device->features().extExtendedDynamicState3.extendedDynamicState3DepthClipEnable)
         m_flags.set(DxvkContextFlag::GpDirtyDepthClip);
@@ -5715,6 +5801,12 @@ namespace dxvk {
         m_flags.set(m_state.gp.state.useDynamicDepthBounds()
           ? DxvkContextFlag::GpDynamicDepthBounds
           : DxvkContextFlag::GpDirtyDepthBounds);
+      }
+
+      if (m_device->canUseSampleLocations(0u)) {
+        m_flags.set(m_state.gp.state.useSampleLocations()
+          ? DxvkContextFlag::GpDynamicSampleLocations
+          : DxvkContextFlag::GpDirtySampleLocations);
       }
 
       m_flags.set(m_state.gp.state.useDynamicDepthTest()
@@ -6583,14 +6675,34 @@ namespace dxvk {
       DxvkFramebufferSize renderSize = m_state.om.framebufferInfo.size();
 
       for (uint32_t i = 0; i < m_state.vp.viewportCount; i++) {
+        const auto& viewport = m_state.vp.viewports[i];
         const auto& scissor = m_state.vp.scissorRects[i];
 
-        clampedScissors[i].offset = VkOffset2D {
-          std::clamp<int32_t>(scissor.offset.x, 0, renderSize.width),
-          std::clamp<int32_t>(scissor.offset.y, 0, renderSize.height) };
-        clampedScissors[i].extent = VkExtent2D {
-          uint32_t(std::clamp<int32_t>(scissor.offset.x + scissor.extent.width,  clampedScissors[i].offset.x, renderSize.width)  - clampedScissors[i].offset.x),
-          uint32_t(std::clamp<int32_t>(scissor.offset.y + scissor.extent.height, clampedScissors[i].offset.y, renderSize.height) - clampedScissors[i].offset.y) };
+        // Need to floor scissor to viewport region to match D3D rules
+        VkOffset2D lo = {
+          std::max(scissor.offset.x, int32_t(std::max(0.0f, viewport.x))),
+          std::max(scissor.offset.y, int32_t(std::max(0.0f, std::min(viewport.y, viewport.y + viewport.height)))) };
+
+        VkOffset2D hi = {
+          std::min(int32_t(renderSize.width),  int32_t(std::max(0.0f, viewport.x + viewport.width))),
+          std::min(int32_t(renderSize.height), int32_t(std::max(0.0f, std::max(viewport.y, viewport.y + viewport.height)))) };
+
+        hi.x = std::max(hi.x, lo.x);
+        hi.y = std::max(hi.y, lo.y);
+
+        auto& dst = clampedScissors[i];
+        dst.offset = lo;
+        dst.extent = VkExtent2D {
+          std::min(scissor.extent.width,  uint32_t(hi.x - lo.x)),
+          std::min(scissor.extent.height, uint32_t(hi.y - lo.y)) };
+
+        // Extend render area based on the final scissor rect
+        m_state.om.renderAreaLo = {
+          std::min(m_state.om.renderAreaLo.x, dst.offset.x),
+          std::min(m_state.om.renderAreaLo.y, dst.offset.y) };
+        m_state.om.renderAreaHi = {
+          std::max(m_state.om.renderAreaHi.x, int32_t(dst.offset.x + dst.extent.width)),
+          std::max(m_state.om.renderAreaHi.y, int32_t(dst.offset.y + dst.extent.height)) };
       }
 
       m_cmd->cmdSetViewport(m_state.vp.viewportCount, m_state.vp.viewports.data());
@@ -6624,6 +6736,36 @@ namespace dxvk {
       if (m_device->features().extExtendedDynamicState3.extendedDynamicState3AlphaToCoverageEnable
        && !m_state.gp.flags.test(DxvkGraphicsPipelineFlag::HasSampleMaskExport))
         m_cmd->cmdSetAlphaToCoverageState(m_state.gp.state.ms.enableAlphaToCoverage());
+    }
+
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtySampleLocations,
+                             DxvkContextFlag::GpDynamicSampleLocations))) {
+      m_flags.clr(DxvkContextFlag::GpDirtySampleLocations);
+
+      // While technically undefined behaviour according to the Vulkan spec, we do not track
+      // whether an image has been rendered to using centered or default sample locations.
+      // On AMD hardware, it seems like samples may be reordered depending on their position,
+      // and the interpretation of depth-stencil image contents can change depending on the
+      // sample locations used for rendering said content. We can generally expect games to
+      // render most of its content with regular sample positions and only draw a small portion
+      // with centered positions, so we would want the default interpretation to use default
+      // sample positions anyway, e.g. for the purpose of copies or resolves.
+      VkSampleCountFlagBits msSampleCount = VkSampleCountFlagBits(m_state.gp.state.ms.sampleCount());
+      VkSampleCountFlagBits rsSampleCount = VkSampleCountFlagBits(m_state.gp.state.rs.sampleCount());
+
+      if (!msSampleCount)
+        msSampleCount = rsSampleCount ? rsSampleCount : VK_SAMPLE_COUNT_1_BIT;
+
+      bool center = m_state.gp.state.useSampleLocations();
+      bool enable = m_device->canUseSampleLocations(msSampleCount);
+
+      if (enable && m_state.om.renderTargets.depth.view) {
+        auto flags = m_state.om.renderTargets.depth.view->image()->info().flags;
+        enable = bool(flags & VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT);
+      }
+
+      VkSampleLocationsInfoEXT locations = util::setupSampleLocations(msSampleCount, center);
+      m_cmd->cmdSetSampleLocations(enable && center, &locations);
     }
 
     if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyBlendConstants,
@@ -6892,6 +7034,27 @@ namespace dxvk {
                       DxvkContextFlag::GpDirtySpecConstants,
                       DxvkContextFlag::GpDirtyXfbBuffers))
         this->spillRenderPass(true);
+    }
+
+    // If a depth-stencil image is bound used with non-default sample locations,
+    // make sure that the image actually has the compat flag set.
+    if (unlikely(m_state.gp.state.useSampleLocations())) {
+      if (m_state.om.renderTargets.depth.view) {
+        VkSampleCountFlagBits samples = m_state.om.renderTargets.depth.view->image()->info().sampleCount;
+
+        if (m_device->canUseSampleLocations(samples)) {
+          auto flags = m_state.om.renderTargets.depth.view->image()->info().flags;
+
+          if (!(flags & VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT)) {
+            this->spillRenderPass(true);
+
+            DxvkImageUsageInfo usage = { };
+            usage.flags = VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
+
+            ensureImageCompatibility(m_state.om.renderTargets.depth.view->image(), usage);
+          }
+        }
+      }
     }
 
     if (m_flags.test(DxvkContextFlag::GpRenderPassSideEffects)
@@ -7828,6 +7991,7 @@ namespace dxvk {
       DxvkContextFlag::GpDirtyStencilRef,
       DxvkContextFlag::GpDirtyMultisampleState,
       DxvkContextFlag::GpDirtyRasterizerState,
+      DxvkContextFlag::GpDirtySampleLocations,
       DxvkContextFlag::GpDirtyViewport,
       DxvkContextFlag::GpDirtyDepthBias,
       DxvkContextFlag::GpDirtyDepthBounds,
@@ -8296,7 +8460,7 @@ namespace dxvk {
         // Ensure that images are not affected by legacy
         // layout tracking, and have no pending clears etc.
         if (cmdBuffer == DxvkCmdBuffer::ExecBuffer && flushClears)
-          needsFlush = flushDeferredClear(*e.image, e.image->getAvailableSubresources());
+          needsFlush |= flushDeferredClear(*e.image, e.image->getAvailableSubresources());
 
         if (!needsFlush) {
           if (!e.imageExtent.width) {

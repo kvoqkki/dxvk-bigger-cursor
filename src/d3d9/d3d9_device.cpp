@@ -48,6 +48,7 @@ namespace dxvk {
           DWORD                  BehaviorFlags,
           Rc<DxvkDevice>         dxvkDevice)
     : m_parent             ( pParent )
+    , m_d3d9Options        ( dxvkDevice, pParent->GetInstance()->config() )
     , m_deviceType         ( DeviceType )
     , m_window             ( hFocusWindow )
     , m_behaviorFlags      ( BehaviorFlags )
@@ -59,7 +60,6 @@ namespace dxvk {
     , m_shaderModules      ( new D3D9ShaderModuleSet )
     , m_stagingBuffer      ( dxvkDevice, StagingBufferSize )
     , m_stagingBufferFence ( new sync::Fence() )
-    , m_d3d9Options        ( dxvkDevice, pParent->GetInstance()->config() )
     , m_multithread        ( BehaviorFlags & D3DCREATE_MULTITHREADED )
     , m_isSWVP             ( (BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) != 0 )
     , m_isD3D8Compatible   ( pParent->IsD3D8Compatible() )
@@ -202,6 +202,8 @@ namespace dxvk {
 
     BindFFUbershader<DxsoProgramType::VertexShader>();
     BindFFUbershader<DxsoProgramType::PixelShader>();
+
+    m_unlockAdditionalFormats = m_parent->HasFormatsUnlocked();
 
     hqxInit();
 
@@ -2658,6 +2660,7 @@ namespace dxvk {
 
         case D3DRS_CULLMODE:
         case D3DRS_FILLMODE:
+        case D3DRS_MULTISAMPLEANTIALIAS:
           m_dirty.set(D3D9DeviceDirtyFlag::RasterizerState);
           break;
 
@@ -4164,7 +4167,7 @@ namespace dxvk {
       bool dirty = m_specInfo.set<D3D9SpecConstantId::SpecFFLastActiveTextureStage>(0u);
       dirty |= m_specInfo.set<D3D9SpecConstantId::SpecFFGlobalSpecularEnabled>(0u);
       constexpr uint32_t perTextureStageSpecConsts = static_cast<uint32_t>(D3D9SpecConstantId::SpecFFTextureStage1ColorOp) - static_cast<uint32_t>(D3D9SpecConstantId::SpecFFTextureStage0ColorOp);
-      for (uint32_t i = 0; i < 4; i++) {
+      for (uint32_t i = 0; i < caps::TextureStageCount; i++) {
         dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorOp + perTextureStageSpecConsts * i), 0u);
         dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg1 + perTextureStageSpecConsts * i), 0u);
         dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg2 + perTextureStageSpecConsts * i), 0u);
@@ -4172,6 +4175,9 @@ namespace dxvk {
         dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg1 + perTextureStageSpecConsts * i), 0u);
         dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg2 + perTextureStageSpecConsts * i), 0u);
         dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ResultIsTemp + perTextureStageSpecConsts * i), 0u);
+        // Color arg0 and alpha arg0 for all stages are packed after all the other FF spec consts
+        dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg0 + i), 0u);
+        dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg0 + i), 0u);
       }
       if (dirty) {
         m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
@@ -5067,7 +5073,7 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::WaitStagingBuffer() {
+  void D3D9DeviceEx::ThrottleAllocation() {
     // Treshold for staging memory in flight. Since the staging buffer granularity
     // is somewhat coars, it is possible for one additional allocation to be in use,
     // but otherwise this is a hard upper bound.
@@ -5079,7 +5085,9 @@ namespace dxvk {
     // that staging buffer memory gets recycled relatively soon.
     constexpr VkDeviceSize MaxStagingMemoryPerSubmission = MaxStagingMemoryInFlight / 3u;
 
-    VkDeviceSize stagingBufferAllocated = m_stagingBuffer.getStatistics().allocatedTotal;
+    DxvkStagingBufferStats stats = GetStagingMemoryStatistics();
+
+    VkDeviceSize stagingBufferAllocated = stats.allocatedTotal;
 
     if (stagingBufferAllocated > m_stagingMemorySignaled + MaxStagingMemoryPerSubmission) {
       // Perform submission. If the amount of staging memory allocated since the
@@ -5095,6 +5103,14 @@ namespace dxvk {
     // Wait for staging memory to get recycled.
     if (stagingBufferAllocated > MaxStagingMemoryInFlight)
       m_dxvkDevice->waitForFence(*m_stagingBufferFence, stagingBufferAllocated - MaxStagingMemoryInFlight);
+  }
+
+
+  DxvkStagingBufferStats D3D9DeviceEx::GetStagingMemoryStatistics() const {
+    DxvkStagingBufferStats stats = m_stagingBuffer.getStatistics();
+    stats.allocatedTotal += m_discardMemoryCounter;
+    stats.allocatedSinceLastReset += m_discardMemoryCounter - m_discardMemoryOnFlush;
+    return stats;
   }
 
 
@@ -5525,7 +5541,7 @@ namespace dxvk {
     VkOffset3D DestOffset) {
     // Wait until the amount of used staging memory is under a certain threshold to avoid using
     // too much memory and even more so to avoid using too much address space.
-    WaitStagingBuffer();
+    ThrottleAllocation();
 
     const Rc<DxvkImage> image = pDestTexture->GetImage();
 
@@ -5695,8 +5711,8 @@ namespace dxvk {
 
     auto& desc = *pResource->Desc();
 
-    // Ignore DISCARD if NOOVERWRITE is set
-    if (unlikely((Flags & (D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE)) == (D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE)))
+    // Ignore DISCARD if NOOVERWRITE or READONLY is set
+    if (unlikely((Flags & (D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE | D3DLOCK_READONLY)) != D3DLOCK_DISCARD))
       Flags &= ~D3DLOCK_DISCARD;
 
     // Ignore DISCARD and NOOVERWRITE if the buffer is not DEFAULT pool (tests + Halo 2)
@@ -5720,11 +5736,16 @@ namespace dxvk {
     if (unlikely(CanOnlySWVP() && !pResource->NeedsReadback()))
       Flags |= D3DLOCK_NOOVERWRITE;
 
+    // READONLY is ignored for non-managed pools
+    if ((Flags & D3DLOCK_READONLY) && !IsPoolManaged(desc.Pool))
+      Flags &= ~D3DLOCK_READONLY;
+
     // We only bounds check for MANAGED.
     // (TODO: Apparently this is meant to happen for DYNAMIC too but I am not sure
     //  how that works given it is meant to be a DIRECT access..?)
     const bool respectUserBounds = !(Flags & D3DLOCK_DISCARD) &&
-                                    SizeToLock != 0;
+                                    SizeToLock != 0 &&
+                                    (desc.Pool == D3DPOOL_MANAGED || (desc.Usage & D3DUSAGE_DYNAMIC));
 
     // If we don't respect the bounds, encompass it all in our tests/checks
     // These values may be out of range and don't get clamped.
@@ -5753,6 +5774,9 @@ namespace dxvk {
       // If we're not directly mapped and don't need readback,
       // the buffer is not currently getting used anyway
       // so there's no reason to waste memory by discarding.
+
+      m_discardMemoryCounter += desc.Size;
+      ThrottleAllocation();
 
       // Allocate a new backing slice for the buffer and set
       // it as the 'new' mapped slice. This assumes that the
@@ -5821,7 +5845,7 @@ namespace dxvk {
         D3D9CommonBuffer*       pResource) {
     // Wait until the amount of used staging memory is under a certain threshold to avoid using
     // too much memory and even more so to avoid using too much address space.
-    WaitStagingBuffer();
+    ThrottleAllocation();
 
     auto dstBuffer = pResource->GetBufferSlice<D3D9_COMMON_BUFFER_TYPE_REAL>();
     auto srcSlice = pResource->GetMappedSlice();
@@ -6500,7 +6524,10 @@ namespace dxvk {
       m_submitStatus.result = VK_NOT_READY;
 
     // Update signaled staging buffer counter and signal the fence
-    m_stagingMemorySignaled = m_stagingBuffer.getStatistics().allocatedTotal;
+    m_stagingMemorySignaled = GetStagingMemoryStatistics().allocatedTotal;
+
+    // Reset counter for discarded memory in flight
+    m_discardMemoryOnFlush = m_discardMemoryCounter;
 
     // Add commands to flush the threaded
     // context, then flush the command list
@@ -7505,6 +7532,9 @@ namespace dxvk {
     state.setFrontFace(VK_FRONT_FACE_CLOCKWISE);
     state.setPolygonMode(DecodeFillMode(D3DFILLMODE(rs[D3DRS_FILLMODE])));
     state.setFlatShading(m_state.renderStates[D3DRS_SHADEMODE] == D3DSHADE_FLAT);
+    state.setSampleCount(m_state.renderStates[D3DRS_MULTISAMPLEANTIALIAS]
+      ? VkSampleCountFlags(0u)
+      : VkSampleCountFlags(VK_SAMPLE_COUNT_1_BIT));
 
     EmitCs([
       cState  = state
@@ -8637,7 +8667,7 @@ namespace dxvk {
       bool dirty = m_specInfo.set<D3D9SpecConstantId::SpecFFLastActiveTextureStage>(lastActiveTextureStage);
       dirty |= m_specInfo.set<D3D9SpecConstantId::SpecFFGlobalSpecularEnabled>(m_state.renderStates[D3DRS_SPECULARENABLE]);
       constexpr uint32_t perTextureStageSpecConsts = static_cast<uint32_t>(D3D9SpecConstantId::SpecFFTextureStage1ColorOp) - static_cast<uint32_t>(D3D9SpecConstantId::SpecFFTextureStage0ColorOp);
-      for (uint32_t i = 0; i < 4; i++) {
+      for (uint32_t i = 0; i < caps::TextureStageCount; i++) {
         if (i <= activeTextureStageCount) {
           dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorOp + perTextureStageSpecConsts * i), key.Stages[i].Contents.ColorOp);
           dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg1 + perTextureStageSpecConsts * i), repackArg(key.Stages[i].Contents.ColorArg1));
@@ -8646,6 +8676,9 @@ namespace dxvk {
           dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg1 + perTextureStageSpecConsts * i), repackArg(key.Stages[i].Contents.AlphaArg1));
           dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg2 + perTextureStageSpecConsts * i), repackArg(key.Stages[i].Contents.AlphaArg2));
           dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ResultIsTemp + perTextureStageSpecConsts * i), key.Stages[i].Contents.ResultIsTemp);
+          // Color arg0 and alpha arg0 for all stages are packed after all the other FF spec consts
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg0 + i), repackArg(key.Stages[i].Contents.ColorArg0));
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg0 + i), repackArg(key.Stages[i].Contents.AlphaArg0));
         } else {
           dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorOp + perTextureStageSpecConsts * i), 0);
           dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg1 + perTextureStageSpecConsts * i), 0);
@@ -8654,6 +8687,9 @@ namespace dxvk {
           dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg1 + perTextureStageSpecConsts * i), 0);
           dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg2 + perTextureStageSpecConsts * i), 0);
           dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ResultIsTemp + perTextureStageSpecConsts * i), 0);
+          // Color arg0 and alpha arg0 for all stages are packed after all the other FF spec consts
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0ColorArg0 + i), 0u);
+          dirty |= m_specInfo.set(static_cast<D3D9SpecConstantId>(D3D9SpecConstantId::SpecFFTextureStage0AlphaArg0 + i), 0u);
         }
       }
       if (dirty) {
@@ -9102,7 +9138,7 @@ namespace dxvk {
 
   HRESULT D3D9DeviceEx::ResetSwapChain(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode) {
     D3D9Format backBufferFmt = EnumerateFormat(pPresentationParameters->BackBufferFormat);
-    bool unlockedFormats = m_implicitSwapchain != nullptr && m_implicitSwapchain->HasFormatsUnlocked();
+    bool unlockedFormats = m_parent->HasFormatsUnlocked();
 
     Logger::info(str::format(
       "D3D9DeviceEx::ResetSwapChain:\n",

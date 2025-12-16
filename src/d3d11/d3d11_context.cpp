@@ -48,6 +48,13 @@ namespace dxvk {
       bufferUsage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 
     m_allocationCache = m_device->createAllocationCache(bufferUsage, memoryFlags);
+
+    // Determine maximum tess factor based on device options
+    int32_t tessFactorOption = m_parent->GetOptions()->maxTessFactor;
+    m_maxTessFactor = std::min(m_device->properties().core.properties.limits.maxTessellationGenerationLevel, 64u);
+
+    if (tessFactorOption > 0 && tessFactorOption < int32_t(m_maxTessFactor))
+      m_maxTessFactor = tessFactorOption;
   }
 
 
@@ -2376,7 +2383,7 @@ namespace dxvk {
     D3D10DeviceLock lock = LockContext();
 
     if (ppBlendState)
-      *ppBlendState = ref(m_state.om.cbState);
+      *ppBlendState = m_state.om.cbState.ref();
 
     if (BlendFactor)
       std::memcpy(BlendFactor, m_state.om.blendFactor, sizeof(FLOAT) * 4);
@@ -2393,7 +2400,7 @@ namespace dxvk {
     D3D10DeviceLock lock = LockContext();
 
     if (ppDepthStencilState)
-      *ppDepthStencilState = ref(m_state.om.dsState);
+      *ppDepthStencilState = m_state.om.dsState.ref();
 
     if (pStencilRef)
       *pStencilRef = m_state.om.stencilRef;
@@ -2404,26 +2411,28 @@ namespace dxvk {
   void STDMETHODCALLTYPE D3D11CommonContext<ContextType>::RSSetState(ID3D11RasterizerState* pRasterizerState) {
     D3D10DeviceLock lock = LockContext();
 
-    auto currRasterizerState = m_state.rs.state;
-    auto nextRasterizerState = static_cast<D3D11RasterizerState*>(pRasterizerState);
+    auto newRasterizerState = static_cast<D3D11RasterizerState*>(pRasterizerState);
 
-    if (m_state.rs.state != nextRasterizerState) {
-      m_state.rs.state = nextRasterizerState;
+    if (m_state.rs.state != newRasterizerState) {
+      // Need to keep the previous rasterizer state object alive for the time being
+      auto oldRasterizerState = std::move(m_state.rs.state);
+
+      m_state.rs.state = newRasterizerState;
       ApplyRasterizerState();
 
       // If necessary, update the rasterizer sample count push constant
-      uint32_t currSampleCount = currRasterizerState != nullptr ? currRasterizerState->Desc()->ForcedSampleCount : 0;
-      uint32_t nextSampleCount = nextRasterizerState != nullptr ? nextRasterizerState->Desc()->ForcedSampleCount : 0;
+      uint32_t oldSampleCount = oldRasterizerState ? oldRasterizerState->Desc().ForcedSampleCount : 0;
+      uint32_t newSampleCount = newRasterizerState ? newRasterizerState->Desc().ForcedSampleCount : 0;
 
-      if (currSampleCount != nextSampleCount)
+      if (oldSampleCount != newSampleCount)
         ApplyRasterizerSampleCount();
 
       // In D3D11, the rasterizer state defines whether the scissor test is
       // enabled, so if that changes, we need to update scissor rects as well.
-      bool currScissorEnable = currRasterizerState && currRasterizerState->Desc()->ScissorEnable;
-      bool nextScissorEnable = nextRasterizerState && nextRasterizerState->Desc()->ScissorEnable;
+      bool oldScissorEnable = oldRasterizerState && oldRasterizerState->Desc().ScissorEnable;
+      bool newScissorEnable = newRasterizerState && newRasterizerState->Desc().ScissorEnable;
 
-      if (currScissorEnable != nextScissorEnable)
+      if (oldScissorEnable != newScissorEnable)
         ApplyViewportState();
     }
   }
@@ -2496,7 +2505,7 @@ namespace dxvk {
       }
     }
 
-    if (dirty && m_state.rs.state && m_state.rs.state->Desc()->ScissorEnable)
+    if (dirty && m_state.rs.state && m_state.rs.state->Desc().ScissorEnable)
       ApplyViewportState();
   }
 
@@ -2506,7 +2515,7 @@ namespace dxvk {
     D3D10DeviceLock lock = LockContext();
 
     if (ppRasterizerState)
-      *ppRasterizerState = ref(m_state.rs.state);
+      *ppRasterizerState = m_state.rs.state.ref();
   }
 
 
@@ -3175,7 +3184,7 @@ namespace dxvk {
     DirtyMask.samplerMask -= bindMask;
 
     for (uint32_t slot : bit::BitMask(bindMask))
-      BindSampler(Stage, slot, state.samplers[slot]);
+      BindSampler(Stage, slot, state.samplers[slot].ptr());
   }
 
 
@@ -3422,23 +3431,22 @@ namespace dxvk {
 
   template<typename ContextType>
   void D3D11CommonContext<ContextType>::ApplyRasterizerSampleCount() {
-    D3D11ShaderPushData pc = { };
-    pc.rasterizerSampleCount = m_state.om.sampleCount;
+    uint32_t sampleCount = m_state.om.sampleCount;
 
-    if (unlikely(!m_state.om.sampleCount)) {
-      pc.rasterizerSampleCount = m_state.rs.state
-        ? m_state.rs.state->Desc()->ForcedSampleCount
-        : 0;
+    if (unlikely(!sampleCount)) {
+      sampleCount = m_state.rs.state
+        ? m_state.rs.state->Desc().ForcedSampleCount
+        : 0u;
 
-      if (!pc.rasterizerSampleCount)
-        pc.rasterizerSampleCount = 1;
+      if (!sampleCount)
+        sampleCount = 1u;
     }
 
     EmitCs([
-      cPushConstants = pc
+      cPushConstants = DxvkBuiltInPushData(sampleCount, m_maxTessFactor)
     ] (DxvkContext* ctx) {
       ctx->pushData(VK_SHADER_STAGE_ALL_GRAPHICS,
-        0, sizeof(cPushConstants), &cPushConstants);
+        0u, sizeof(cPushConstants), &cPushConstants);
     });
   }
 
@@ -3455,7 +3463,7 @@ namespace dxvk {
 
       // Vulkan does not provide an easy way to disable the scissor test,
       // Set scissor rects that are at least as large as the framebuffer.
-      bool enableScissorTest = m_state.rs.state && m_state.rs.state->Desc()->ScissorEnable;
+      bool enableScissorTest = m_state.rs.state && m_state.rs.state->Desc().ScissorEnable;
 
       // D3D11's coordinate system has its origin in the bottom left,
       // but the viewport coordinates are aligned to the top-left
@@ -4719,7 +4727,7 @@ namespace dxvk {
 
     for (uint32_t i = 0; i < NumSamplers; i++) {
       ppSamplers[i] = StartSlot + i < bindings.samplers.size()
-        ? ref(bindings.samplers[StartSlot + i])
+        ? bindings.samplers[StartSlot + i].ref()
         : nullptr;
     }
   }
@@ -4810,7 +4818,8 @@ namespace dxvk {
   template<typename ContextType>
   void D3D11CommonContext<ContextType>::ResetCommandListState() {
     EmitCs([
-      cUsedBindings = GetMaxUsedBindings()
+      cUsedBindings  = GetMaxUsedBindings(),
+      cMaxTessFactor = m_maxTessFactor
     ] (DxvkContext* ctx) {
       // Reset render targets
       ctx->bindRenderTargets(DxvkRenderTargets(), 0u);
@@ -4903,8 +4912,7 @@ namespace dxvk {
       }
 
       // Initialize push constants
-      D3D11ShaderPushData pc = { };
-      pc.rasterizerSampleCount = 1u;
+      DxvkBuiltInPushData pc(1u, cMaxTessFactor);
       ctx->pushData(VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(pc), &pc);
     });
   }
@@ -5126,7 +5134,7 @@ namespace dxvk {
     const auto& bindings = m_state.samplers[Stage];
 
     for (uint32_t i = 0; i < bindings.maxCount; i++)
-      BindSampler(Stage, i, bindings.samplers[i]);
+      BindSampler(Stage, i, bindings.samplers[i].ptr());
   }
 
 

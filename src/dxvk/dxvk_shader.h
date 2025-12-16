@@ -20,6 +20,26 @@ namespace dxvk {
   struct DxvkPipelineStats;
 
   /**
+   * \brief Push data to handle built-ins
+   */
+  struct DxvkBuiltInPushData {
+    static constexpr uint32_t SampleCountOffset = 0u;
+    static constexpr uint32_t SampleCountBits = 8u;
+
+    static constexpr uint32_t MaxTessFactorOffset = SampleCountOffset + SampleCountBits;
+    static constexpr uint32_t MaxTessFactorBits = 8u;
+
+    DxvkBuiltInPushData() = default;
+
+    explicit DxvkBuiltInPushData(uint32_t sampleCount, uint32_t maxTessFactor)
+    : builtIns((sampleCount   << SampleCountOffset)
+             | (maxTessFactor << MaxTessFactorOffset)) { }
+
+    uint32_t builtIns = 0u;
+  };
+
+
+  /**
    * \brief Shader compile flags
    */
   enum class DxvkShaderCompileFlag : uint32_t {
@@ -61,6 +81,8 @@ namespace dxvk {
     /// constant buffer. The register space and index for this
     /// buffer are defined in the compile options.
     LowerConstantArrays         = 11u,
+    /// Whether to enable semantic-based I/O interface matching
+    SemanticIo                  = 12u,
   };
 
   using DxvkShaderCompileFlags = Flags<DxvkShaderCompileFlag>;
@@ -133,15 +155,12 @@ namespace dxvk {
     /// bindigs beyond this will be lowered to a storage buffer.
     /// Negative numbers impose no limit on the number of buffers.
     int32_t maxUniformBufferCount = -1;
-    /// Maximum tessellation factor. If 0, tessellation factors
-    /// will not be clamped beyond what is set in the shader.
-    uint8_t maxTessFactor = 0u;
-    /// Global push data offset for rasterizer sample count
-    uint8_t sampleCountPushDataOffset = 0u;
+    /// Global push data offset for emulated built-ins
+    uint32_t builtInPushDataOffset = 0u;
     /// Minimum required storage buffer alignment. Buffers
     /// with a smaller guaranteed alignment must be demoted
     /// to typed buffers.
-    uint16_t minStorageBufferAlignment = 0u;
+    uint32_t minStorageBufferAlignment = 0u;
   };
 
 
@@ -161,6 +180,7 @@ namespace dxvk {
     UsesFragmentCoverage,
     UsesSparseResidency,
     TessellationPoints,
+    SemanticIo,
   };
 
   using DxvkShaderFlags = Flags<DxvkShaderFlag>;
@@ -200,6 +220,7 @@ namespace dxvk {
   struct DxvkShaderLinkage {
     bool fsDualSrcBlend  = false;
     bool fsFlatShading   = false;
+    bool semanticIo      = false;
 
     VkPrimitiveTopology inputTopology = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
 
