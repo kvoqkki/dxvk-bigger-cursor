@@ -4819,18 +4819,9 @@ namespace dxvk {
 
     const uint32_t samplerBit = 1u << StateSampler;
 
-    if (Type == D3DSAMP_ADDRESSU
-     || Type == D3DSAMP_ADDRESSV
-     || Type == D3DSAMP_ADDRESSW
-     || Type == D3DSAMP_MAGFILTER
-     || Type == D3DSAMP_MINFILTER
-     || Type == D3DSAMP_MIPFILTER
-     || Type == D3DSAMP_MAXANISOTROPY
-     || Type == D3DSAMP_MIPMAPLODBIAS
-     || Type == D3DSAMP_MAXMIPLEVEL
-     || Type == D3DSAMP_BORDERCOLOR)
-      m_textureSlotTracking.samplerStateDirty |= samplerBit;
-    else if (Type == D3DSAMP_SRGBTEXTURE && (m_textureSlotTracking.bound & samplerBit))
+    m_textureSlotTracking.samplerStateDirty |= samplerBit;
+
+    if (Type == D3DSAMP_SRGBTEXTURE && (m_textureSlotTracking.bound & samplerBit))
       m_textureSlotTracking.textureDirty |= samplerBit;
 
     constexpr DWORD Fetch4Enabled  = MAKEFOURCC('G', 'E', 'T', '4');
@@ -4888,6 +4879,13 @@ namespace dxvk {
     TextureChangePrivate(m_state.textures[StateSampler], pTexture);
     m_textureSlotTracking.textureDirty |= 1u << StateSampler;
     UpdateTextureBitmasks(StateSampler, combinedUsage);
+
+    // If the texture format changes and the corresponding sampler uses
+    // border colors, we may need to update the border color swizzle
+    if (!oldTexture || !newTexture || oldTexture->Desc()->Format != newTexture->Desc()->Format) {
+      if (SamplerUsesBorderColor(StateSampler))
+        m_textureSlotTracking.samplerStateDirty |= 1u << StateSampler;
+    }
 
     return D3D_OK;
   }
@@ -5074,26 +5072,24 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::ThrottleAllocation() {
+    // Threshold at which to submit eagerly. This is useful to ensure
+    // that staging buffer memory gets recycled relatively soon.
+    constexpr VkDeviceSize MaxMemoryPerSubmission = (env::is32BitHostPlatform() ? 10u : 30u) << 20u;
+
     // Treshold for staging memory in flight. Since the staging buffer granularity
     // is somewhat coars, it is possible for one additional allocation to be in use,
     // but otherwise this is a hard upper bound.
-    constexpr VkDeviceSize MaxStagingMemoryInFlight = env::is32BitHostPlatform()
-      ? StagingBufferSize * 4
-      : StagingBufferSize * 16;
-
-    // Threshold at which to submit eagerly. This is useful to ensure
-    // that staging buffer memory gets recycled relatively soon.
-    constexpr VkDeviceSize MaxStagingMemoryPerSubmission = MaxStagingMemoryInFlight / 3u;
+    constexpr VkDeviceSize MaxMemoryInFlight = MaxMemoryPerSubmission * 3u;
 
     DxvkStagingBufferStats stats = GetStagingMemoryStatistics();
 
     VkDeviceSize stagingBufferAllocated = stats.allocatedTotal;
 
-    if (stagingBufferAllocated > m_stagingMemorySignaled + MaxStagingMemoryPerSubmission) {
+    if (stagingBufferAllocated > m_stagingMemorySignaled + MaxMemoryPerSubmission) {
       // Perform submission. If the amount of staging memory allocated since the
       // last submission exceeds the hard limit, we need to submit to guarantee
       // forward progress. Ideally, this should not happen very often.
-      GpuFlushType flushType = stagingBufferAllocated <= m_stagingMemorySignaled + MaxStagingMemoryInFlight
+      GpuFlushType flushType = stagingBufferAllocated <= m_stagingMemorySignaled + MaxMemoryInFlight
         ? GpuFlushType::ImplicitSynchronization
         : GpuFlushType::ExplicitFlush;
 
@@ -5101,8 +5097,8 @@ namespace dxvk {
     }
 
     // Wait for staging memory to get recycled.
-    if (stagingBufferAllocated > MaxStagingMemoryInFlight)
-      m_dxvkDevice->waitForFence(*m_stagingBufferFence, stagingBufferAllocated - MaxStagingMemoryInFlight);
+    if (stagingBufferAllocated > MaxMemoryInFlight)
+      m_dxvkDevice->waitForFence(*m_stagingBufferFence, stagingBufferAllocated - MaxMemoryInFlight);
   }
 
 
@@ -7639,6 +7635,12 @@ namespace dxvk {
     m_samplerBindCount++;
 
     const D3D9CommonTexture* tex = GetCommonTexture(m_state.textures[Sampler]);
+    const bool srgb = m_state.samplerStates[Sampler][D3DSAMP_SRGBTEXTURE] & 0x1;
+
+    Rc<DxvkImageView> imageView;
+
+    if (tex && SamplerUsesBorderColor(Sampler))
+      imageView = tex->GetSampleView(srgb);
 
     EmitCs([this,
       cSlot       = slot,
@@ -7646,6 +7648,7 @@ namespace dxvk {
       cIsCube     = tex && tex->IsCube(),
       cIsMultiMip = tex && (tex->Desc()->MipLevels > 1u),
       cIsDepth    = bool(m_textureSlotTracking.depth & (1u << Sampler)),
+      cView       = std::move(imageView),
       cBindId     = m_samplerBindCount
     ] (DxvkContext* ctx) {
       DxvkSamplerKey key = { };
@@ -7693,8 +7696,12 @@ namespace dxvk {
         key.setLodRange(float(cState.maxMipLevel), 16.0f, lodBias);
       }
 
-      if (key.u.p.hasBorder)
+      if (key.u.p.hasBorder) {
         DecodeD3DCOLOR(cState.borderColor, key.borderColor.float32);
+
+        if (cView)
+          key.setViewProperties(cView->info().unpackSwizzle(), cView->info().format);
+      }
 
       VkShaderStageFlags stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
       ctx->bindResourceSampler(stage, cSlot, m_dxvkDevice->createSampler(key));
@@ -7777,6 +7784,15 @@ namespace dxvk {
       if (m_state.textures[i] == texture)
         m_textureSlotTracking.textureDirty |= 1u << i;
     }
+  }
+
+
+  bool D3D9DeviceEx::SamplerUsesBorderColor(DWORD Sampler) const {
+    const auto& sampler = m_state.samplerStates[Sampler];
+
+    return sampler[D3DSAMP_ADDRESSU] == D3DTADDRESS_BORDER
+        || sampler[D3DSAMP_ADDRESSV] == D3DTADDRESS_BORDER
+        || sampler[D3DSAMP_ADDRESSW] == D3DTADDRESS_BORDER;
   }
 
 

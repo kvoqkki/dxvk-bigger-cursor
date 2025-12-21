@@ -1081,6 +1081,8 @@ namespace dxvk {
 
     void MarkTextureBindingDirty(IDirect3DBaseTexture9* texture);
 
+    bool SamplerUsesBorderColor(DWORD Sampler) const;
+
     HRESULT STDMETHODCALLTYPE SetRenderTargetInternal(
             DWORD              RenderTargetIndex,
             IDirect3DSurface9* pRenderTarget);
