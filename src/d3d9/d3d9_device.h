@@ -1284,6 +1284,10 @@ namespace dxvk {
       return m_d3d9On12Args.Enable9On12;
     }
 
+    D3D9Adapter* GetAdapter() const {
+      return m_adapter;
+    }
+
   private:
 
     template<bool AllowFlush = true, typename Cmd>
