@@ -721,6 +721,14 @@ namespace dxvk {
     hints.preferPrimaryCmdBufs = m_adapter->matchesDriver(VK_DRIVER_ID_MESA_HONEYKRISP)
                               || m_adapter->matchesDriver(VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
                               || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV, Version(), Version(25, 0, 2));
+
+    // Compute-based mip generation has some potential for performance
+    // regressions or driver issues. Just enable it on Nvidia and RADV
+    // (GFX10+) for now, where it is proven to work.
+    hints.preferComputeMipGen = (m_adapter->matchesDriver(VK_DRIVER_ID_NVIDIA_PROPRIETARY_KHR)
+                             || (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV)
+                              && m_adapter->deviceProperties().vk13.minSubgroupSize == 32u));
+
     return hints;
   }
 

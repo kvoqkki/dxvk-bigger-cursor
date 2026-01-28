@@ -419,18 +419,6 @@ namespace dxvk {
             VkFilter              filter);
     
     /**
-     * \brief Changes image layout
-     * 
-     * Permanently changes the layout for a given
-     * image. Immediately performs the transition.
-     * \param [in] image The image to transition
-     * \param [in] layout New image layout
-     */
-    void changeImageLayout(
-      const Rc<DxvkImage>&        image,
-            VkImageLayout         layout);
-    
-    /**
      * \brief Clears a buffer with a fixed value
      * 
      * Note that both \c offset and \c length must
@@ -1352,6 +1340,9 @@ namespace dxvk {
     Rc<DxvkCommandList>     m_cmd;
     Rc<DxvkBuffer>          m_zeroBuffer;
 
+    Rc<DxvkBuffer>          m_scratchBuffer;
+    VkDeviceSize            m_scratchOffset = 0u;
+
     DxvkContextFlags        m_flags;
     DxvkContextState        m_state;
     DxvkContextFeatures     m_features;
@@ -1555,6 +1546,17 @@ namespace dxvk {
             uint32_t              maxCount,
             uint32_t              stride);
 
+    void generateMipmapsHw(
+      const Rc<DxvkImageView>&        imageView,
+            VkFilter                  filter);
+
+    void generateMipmapsFb(
+      const Rc<DxvkImageView>&        imageView,
+            VkFilter                  filter);
+
+    void generateMipmapsCs(
+      const Rc<DxvkImageView>&        imageView);
+
     void resolveImageHw(
       const Rc<DxvkImage>&            dstImage,
       const Rc<DxvkImage>&            srcImage,
@@ -1657,6 +1659,8 @@ namespace dxvk {
 
     void releaseRenderTargets();
 
+    bool renderPassStartUnsynchronized();
+
     void renderPassBindFramebuffer(
       const DxvkFramebufferInfo&  framebufferInfo,
             DxvkRenderPassOps&    ops);
@@ -1691,16 +1695,16 @@ namespace dxvk {
     template<VkPipelineBindPoint BindPoint>
     void updateSamplerSet(const DxvkPipelineLayout* layout);
 
-    template<VkPipelineBindPoint BindPoint>
+    template<VkPipelineBindPoint BindPoint, bool AlwaysTrack>
     bool updateResourceBindings(const DxvkPipelineBindings* layout);
 
-    template<VkPipelineBindPoint BindPoint>
+    template<VkPipelineBindPoint BindPoint, bool AlwaysTrack>
     void updateDescriptorSetsBindings(const DxvkPipelineBindings* layout);
 
-    template<VkPipelineBindPoint BindPoint>
+    template<VkPipelineBindPoint BindPoint, bool AlwaysTrack>
     bool updateDescriptorBufferBindings(const DxvkPipelineBindings* layout);
 
-    template<VkPipelineBindPoint BindPoint>
+    template<VkPipelineBindPoint BindPoint, bool AlwaysTrack>
     void updatePushDataBindings(const DxvkPipelineBindings* layout);
 
     void updateComputeShaderResources();
@@ -1794,6 +1798,17 @@ namespace dxvk {
             return DxvkAccessFlags(DxvkAccess::Write);
         }
       } else {
+        // In an unsynchronized render pass we need to ensure that we properly
+        // sync against accesses from outside the pass.
+        if (m_flags.test(DxvkContextFlag::GpRenderPassUnsynchronized)) {
+          VkPipelineStageFlags2 stageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                                          | VK_PIPELINE_STAGE_2_TRANSFER_BIT
+                                          | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+          if (m_execBarriers.hasPendingStages(stageMask))
+            return DxvkAccessFlags();
+        }
+
         // For graphics, the only type of unrelated access we have to worry about
         // is transform feedback writes, in which case inserting a barrier is fine.
         if (m_barrierControl.test(DxvkBarrierControl::GraphicsAllowReadWriteOverlap))
@@ -2122,6 +2137,9 @@ namespace dxvk {
             bool                      discard,
             DxvkAccess                access);
 
+    bool prepareOutOfOrderTransition(
+            DxvkImage&                image);
+
     template<VkPipelineBindPoint BindPoint, typename Pred>
     bool checkResourceBarrier(
       const Pred&                     pred,
@@ -2182,9 +2200,13 @@ namespace dxvk {
 
     void endActiveDebugRegions();
 
-    template<VkPipelineBindPoint BindPoint>
+    DxvkResourceBufferInfo allocateScratchMemory(
+            VkDeviceSize                alignment,
+            VkDeviceSize                size);
+
+    template<bool AlwaysTrack>
     force_inline void trackUniformBufferBinding(const DxvkShaderDescriptor& binding, const DxvkBufferSlice& slice) {
-      if (BindPoint == VK_PIPELINE_BIND_POINT_COMPUTE || unlikely(slice.buffer()->hasGfxStores())) {
+      if (AlwaysTrack || unlikely(slice.buffer()->hasGfxStores())) {
         accessBuffer(DxvkCmdBuffer::ExecBuffer, slice,
           util::pipelineStages(binding.getStageMask()), binding.getAccess(), DxvkAccessOp::None);
       }
@@ -2192,11 +2214,11 @@ namespace dxvk {
       m_cmd->track(slice.buffer(), DxvkAccess::Read);
     }
 
-    template<VkPipelineBindPoint BindPoint, bool IsWritable>
+    template<bool AlwaysTrack, bool IsWritable>
     force_inline void trackBufferViewBinding(const DxvkShaderDescriptor& binding, DxvkBufferView& view) {
       DxvkAccessOp accessOp = IsWritable ? binding.getAccessOp() : DxvkAccessOp::None;
 
-      if (BindPoint == VK_PIPELINE_BIND_POINT_COMPUTE || unlikely(view.buffer()->hasGfxStores())) {
+      if (AlwaysTrack || unlikely(view.buffer()->hasGfxStores())) {
         accessBuffer(DxvkCmdBuffer::ExecBuffer, view,
           util::pipelineStages(binding.getStageMask()), binding.getAccess(), accessOp);
       }
@@ -2206,11 +2228,11 @@ namespace dxvk {
       m_cmd->track(view.buffer(), access);
     }
 
-    template<VkPipelineBindPoint BindPoint, bool IsWritable>
+    template<bool AlwaysTrack, bool IsWritable>
     force_inline void trackImageViewBinding(const DxvkShaderDescriptor& binding, DxvkImageView& view) {
       DxvkAccessOp accessOp = IsWritable ? binding.getAccessOp() : DxvkAccessOp::None;
 
-      if (BindPoint == VK_PIPELINE_BIND_POINT_COMPUTE || unlikely(view.hasGfxStores())) {
+      if (AlwaysTrack || unlikely(view.hasGfxStores())) {
         accessImage(DxvkCmdBuffer::ExecBuffer, view,
           util::pipelineStages(binding.getStageMask()), binding.getAccess(), accessOp);
       }
