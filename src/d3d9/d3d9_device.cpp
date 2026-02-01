@@ -1949,7 +1949,7 @@ namespace dxvk {
 
     if (texInfo != nullptr) {
       // Update render target sampling usage bitmask for hazard tracking
-      m_rtSlotTracking.canBeSampled |= uint8_t(HasRenderTargetBound(RenderTargetIndex) &&
+      m_rtSlotTracking.canBeSampled |= uint8_t(!texInfo->IsNull() &&
         rt->GetBaseTexture() != nullptr) << RenderTargetIndex;
 
       // Update render target alpha swizzle bitmask if we need to fix up the alpha channel
@@ -6591,18 +6591,6 @@ namespace dxvk {
     });
   }
 
-
-  inline void D3D9DeviceEx::UpdateActiveRTs(uint32_t index) {
-    const uint32_t bit = 1 << index;
-
-    m_rtSlotTracking.canBeSampled &= ~bit;
-
-    if (HasRenderTargetBound(index) &&
-      m_state.renderTargets[index]->GetBaseTexture() != nullptr)
-      m_rtSlotTracking.canBeSampled |= bit;
-
-    UpdateActiveHazardsRT(std::numeric_limits<uint32_t>::max());
-  }
 
   template <uint32_t Index>
   inline void D3D9DeviceEx::UpdateAnyColorWrites() {
