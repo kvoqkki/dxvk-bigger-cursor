@@ -1653,8 +1653,10 @@ namespace dxvk {
             VkRenderingAttachmentInfo&  attachment,
             DxvkAccess                  access) const;
 
-    void startRenderPass();
-    void spillRenderPass(bool suspend);
+    void beginRenderPass();
+    void endRenderPass(bool suspend);
+
+    void endCurrentPass(bool suspend);
     
     void acquireRenderTargets(
       const DxvkFramebufferInfo&  framebufferInfo,
@@ -1749,7 +1751,10 @@ namespace dxvk {
 
     template<VkPipelineBindPoint BindPoint>
     void updatePushData();
-    
+
+    void beginComputePass();
+    void endComputePass();
+
     template<bool Indirect, bool Resolve = true>
     bool commitComputeState();
     
@@ -2246,6 +2251,10 @@ namespace dxvk {
       m_cmd->track(view.image(), access);
     }
 
+    bool formatsAreImageCopyCompatible(
+            VkFormat                  dstFormat,
+            VkFormat                  srcFormat);
+
     static uint32_t computePushDataBlockOffset(uint32_t index) {
       return index ? MaxSharedPushDataSize + MaxPerStagePushDataSize * (index - 1u) : 0u;
     }
@@ -2254,7 +2263,7 @@ namespace dxvk {
       const DxvkStencilOp&            op,
             bool                      writable);
 
-    static bool formatsAreCopyCompatible(
+    static bool formatsAreBufferCopyCompatible(
             VkFormat                  imageFormat,
             VkFormat                  bufferFormat);
 

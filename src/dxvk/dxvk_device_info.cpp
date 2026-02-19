@@ -49,6 +49,9 @@ namespace dxvk {
     HANDLE_EXT(khrMaintenance5);                   \
     HANDLE_EXT(khrMaintenance6);                   \
     HANDLE_EXT(khrMaintenance7);                   \
+    HANDLE_EXT(khrMaintenance8);                   \
+    HANDLE_EXT(khrMaintenance9);                   \
+    HANDLE_EXT(khrMaintenance10);                  \
     HANDLE_EXT(khrPipelineLibrary);                \
     HANDLE_EXT(khrPresentId);                      \
     HANDLE_EXT(khrPresentId2);                     \
@@ -82,7 +85,9 @@ namespace dxvk {
     HANDLE_EXT(extVertexAttributeDivisor);         \
     HANDLE_EXT(khrMaintenance5);                   \
     HANDLE_EXT(khrMaintenance6);                   \
-    HANDLE_EXT(khrMaintenance7);
+    HANDLE_EXT(khrMaintenance7);                   \
+    HANDLE_EXT(khrMaintenance9);                   \
+    HANDLE_EXT(khrMaintenance10);
 
 
   DxvkDeviceCapabilities::DxvkDeviceCapabilities(
@@ -424,8 +429,25 @@ namespace dxvk {
     uint32_t queueCount = 0u;
     vk->vkGetPhysicalDeviceQueueFamilyProperties2(adapter, &queueCount, nullptr);
 
-    m_queuesAvailable.resize(queueCount, { VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2 });
-    vk->vkGetPhysicalDeviceQueueFamilyProperties2(adapter, &queueCount, m_queuesAvailable.data());
+    // Use local array of base structures as the API requires,
+    // then copy the base structure back to the metadata array
+    std::vector<VkQueueFamilyProperties2> queueFamilies(queueCount, { VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2 });
+
+    // Chain extension structs directly into the metadata structure
+    m_queuesAvailable.resize(queueCount);
+
+    for (uint32_t i = 0u; i < queueCount; i++) {
+      auto& base = queueFamilies[i];
+      auto& meta = m_queuesAvailable[i];
+
+      if (m_featuresSupported.khrMaintenance9.maintenance9)
+        meta.ownershipTransfer.pNext = std::exchange(base.pNext, &meta.ownershipTransfer);
+    }
+
+    vk->vkGetPhysicalDeviceQueueFamilyProperties2(adapter, &queueCount, queueFamilies.data());
+
+    for (uint32_t i = 0u; i < queueCount; i++)
+      m_queuesAvailable[i].core = queueFamilies[i];
 
     if (deviceInfo) {
       // Only mark queues available that the device has been created with
@@ -437,7 +459,7 @@ namespace dxvk {
             queueCount = deviceInfo->pQueueCreateInfos[j].queueCount;
         }
 
-        m_queuesAvailable[i].queueFamilyProperties.queueCount = queueCount;
+        m_queuesAvailable[i].core.queueFamilyProperties.queueCount = queueCount;
       }
     }
   }
@@ -625,7 +647,7 @@ namespace dxvk {
       m_queueMapping.transfer.family = computeQueue;
 
     // Prefer using the graphics queue as a sparse binding queue if possible
-    auto& graphicsQueue = m_queuesAvailable[m_queueMapping.graphics.family];
+    auto& graphicsQueue = m_queuesAvailable[m_queueMapping.graphics.family].core;
 
     if (graphicsQueue.queueFamilyProperties.queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) {
       m_queueMapping.sparse.family = m_queueMapping.graphics.family;
@@ -676,8 +698,8 @@ namespace dxvk {
           VkQueueFlags                mask,
           VkQueueFlags                flags) const {
     for (uint32_t i = 0; i < m_queuesAvailable.size(); i++) {
-      if ((m_queuesAvailable[i].queueFamilyProperties.queueFlags & mask) == flags
-       && (m_queuesAvailable[i].queueFamilyProperties.queueCount))
+      if ((m_queuesAvailable[i].core.queueFamilyProperties.queueFlags & mask) == flags
+       && (m_queuesAvailable[i].core.queueFamilyProperties.queueCount))
         return i;
     }
 
@@ -949,13 +971,17 @@ namespace dxvk {
       ENABLE_EXT(khrExternalMemoryWin32, false),
       ENABLE_EXT(khrExternalSemaphoreWin32, false),
 
-      /* LOAD_OP_NONE for certain tiler optimizations */
-      ENABLE_EXT(khrLoadStoreOpNone, false),
+      /* LOAD_OP_NONE for certain tiler optimizations. Core feature
+       * in Vulkan 1.4, so probably supported by everything we need. */
+      ENABLE_EXT(khrLoadStoreOpNone, true),
 
       /* Maintenance features, relied on in various parts of the code */
       ENABLE_EXT_FEATURE(khrMaintenance5, maintenance5, true),
       ENABLE_EXT_FEATURE(khrMaintenance6, maintenance6, true),
       ENABLE_EXT_FEATURE(khrMaintenance7, maintenance7, false),
+      ENABLE_EXT_FEATURE(khrMaintenance8, maintenance8, false),
+      ENABLE_EXT_FEATURE(khrMaintenance9, maintenance9, false),
+      ENABLE_EXT_FEATURE(khrMaintenance10, maintenance10, false),
 
       /* Dependency for graphics pipeline library */
       ENABLE_EXT(khrPipelineLibrary, true),

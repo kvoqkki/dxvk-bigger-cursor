@@ -1142,6 +1142,15 @@ namespace dxvk {
     { R"(\\Pirates!\.exe$)", {{
       { "d3d9.countLosableResources",      "False" },
     }} },
+    /* Total War Pharaoh Dynasties: Broken menu   *
+     * because the game doesn't manage to respect *
+     * pitch for an A8_UNORM image. Resolves are  *
+     * not needed because the game dynamically    *
+     * checks sample count in affected shaders.   */
+    { R"(\\Pharaoh\.exe$)", {{
+      { "d3d11.disableDirectImageMapping",  "True"  },
+      { "dxvk.enableImplicitResolves",      "False" },
+    }} },
 
     /**********************************************/
     /* D3D8 GAMES                                 */
