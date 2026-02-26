@@ -1173,7 +1173,7 @@ namespace dxvk {
 
     if (access.image && access.imageLayout != access.image->info().layout) {
       // External release barrier and layout transition in one go
-      transitionImageLayout(cmdBuffer, *access.image, access.imageSubresources,
+      transitionImageLayout(*access.image, access.imageSubresources,
         access.stages, access.access, access.imageLayout,
         access.image->info().stages, access.image->info().access, false);
       flushImageLayoutTransitions(cmdBuffer);
@@ -1367,7 +1367,7 @@ namespace dxvk {
     if (image->queryLayout(image->getAvailableSubresources()) != image->info().layout) {
       endCurrentPass(true);
 
-      transitionImageLayout(DxvkCmdBuffer::ExecBuffer, *image,
+      transitionImageLayout(*image,
         image->getAvailableSubresources(),
         image->info().stages, image->info().access,
         image->info().layout, image->info().stages, image->info().access, false);
@@ -1386,7 +1386,7 @@ namespace dxvk {
 
     if (layout != image->info().layout) {
       if (layout == VK_IMAGE_LAYOUT_UNDEFINED || layout == VK_IMAGE_LAYOUT_PREINITIALIZED) {
-        transitionImageLayout(DxvkCmdBuffer::InitBarriers, *image, image->getAvailableSubresources(),
+        transitionImageLayout(*image, image->getAvailableSubresources(),
           image->info().stages, image->info().access, image->info().layout,
           image->info().stages, image->info().access, layout == VK_IMAGE_LAYOUT_UNDEFINED);
         flushImageLayoutTransitions(DxvkCmdBuffer::InitBarriers);
@@ -2370,7 +2370,7 @@ namespace dxvk {
         ? VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
         : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
 
-      transitionImageLayout(DxvkCmdBuffer::ExecBuffer, *dstImage, dstSubresource,
+      transitionImageLayout(*dstImage, dstSubresource,
         dstImage->info().stages, dstImage->info().access, newLayout, stages, access,
         isFullWrite);
 
@@ -8841,7 +8841,7 @@ namespace dxvk {
 
     if (likely(!keepAttachments || !overlapsRenderTarget(image, subresources))) {
       // Transition entire image to its default limit in one go
-      transitionImageLayout(DxvkCmdBuffer::ExecBuffer, image, subresources,
+      transitionImageLayout(image, subresources,
         image.info().stages, image.info().access, image.info().layout,
         image.info().stages, image.info().access, false);
       return true;
@@ -8867,14 +8867,14 @@ namespace dxvk {
               range.layerCount = 1u;
 
               if (!overlapsRenderTarget(image, range)) {
-                transitionImageLayout(DxvkCmdBuffer::ExecBuffer, image, range,
+                transitionImageLayout(image, range,
                   image.info().stages, image.info().access, image.info().layout,
                   image.info().stages, image.info().access, false);
               }
             }
           } else {
             // Transition entire mip level at once
-            transitionImageLayout(DxvkCmdBuffer::ExecBuffer, image, range,
+            transitionImageLayout(image, range,
               image.info().stages, image.info().access, image.info().layout,
               image.info().stages, image.info().access, false);
           }
@@ -8960,8 +8960,7 @@ namespace dxvk {
   }
 
 
-  void DxvkContext::transitionImageLayout(
-          DxvkCmdBuffer             cmdBuffer,
+  bool DxvkContext::transitionImageLayout(
           DxvkImage&                image,
     const VkImageSubresourceRange&  subresources,
           VkPipelineStageFlags2     srcStages,
@@ -8981,8 +8980,8 @@ namespace dxvk {
     if (!discard || !(image.info().usage & rtUsage))
       srcLayout = image.queryLayout(subresources);
 
-    if (srcLayout == dstLayout)
-      return;
+    if (likely(srcLayout == dstLayout))
+      return false;
 
     if (srcLayout == VK_IMAGE_LAYOUT_MAX_ENUM) {
       VkImageAspectFlags aspects = subresources.aspectMask;
@@ -9024,6 +9023,7 @@ namespace dxvk {
     // Need to track for writes here even if
     // the actual access itself is read-only
     m_cmd->track(&image, DxvkAccess::Write);
+    return true;
   }
 
 
@@ -9049,6 +9049,11 @@ namespace dxvk {
           needsFlush |= flushDeferredClear(*batch[i].image, batch[i].image->getAvailableSubresources());
       }
     }
+
+    // Even if we have to perform the current operation on the main command buffer,
+    // we can still try to move layout transitions that may be necessary to an
+    // out-of-order command buffer in order to avoid additional barriers.
+    bool promoteTransitions = m_imageLayoutTransitions.empty();
 
     // Flush any barriers affecting the resources
     VkPipelineStageFlags2 srcStages = 0u;
@@ -9117,9 +9122,14 @@ namespace dxvk {
           dstAccess |= e.access;
         }
 
-        transitionImageLayout(cmdBuffer, *e.image, e.imageSubresources,
+        bool canPromote = !e.image->isTracked(m_trackingId, DxvkAccess::Write);
+
+        bool hasTransition = transitionImageLayout(*e.image, e.imageSubresources,
           e.image->info().stages, e.image->info().access,
           e.imageLayout, e.stages, e.access, e.discard);
+
+        if (hasTransition && !canPromote)
+          promoteTransitions = false;
 
         m_cmd->track(e.image, access);
       }
@@ -9134,6 +9144,10 @@ namespace dxvk {
 
     if (cmdBuffer == DxvkCmdBuffer::ExecBuffer && needsFlush)
       flushBarriers();
+
+    // Move layout transitions and discards to init command buffer if possible
+    if (cmdBuffer == DxvkCmdBuffer::ExecBuffer && promoteTransitions)
+      cmdBuffer = DxvkCmdBuffer::InitBarriers;
 
     flushImageLayoutTransitions(cmdBuffer);
   }
